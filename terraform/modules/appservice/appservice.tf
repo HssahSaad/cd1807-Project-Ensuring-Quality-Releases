@@ -3,7 +3,13 @@ resource "azurerm_service_plan" "test" {
   location            = "${var.location}"
   resource_group_name = "${var.resource_group}"
   os_type             = "Linux"
-  sku_name            = "F1"
+  sku_name = "S1"
+
+  tags = {
+  env     = "dev"
+  project = "eqr"
+  owner   = "hssah"
+}
 }
 
 resource "azurerm_linux_web_app" "test" {
@@ -11,6 +17,12 @@ resource "azurerm_linux_web_app" "test" {
   location            = "${var.location}"
   resource_group_name = "${var.resource_group}"
   service_plan_id     = azurerm_service_plan.test.id
+
+  tags = {
+  env     = "dev"
+  project = "eqr"
+  owner   = "hssah"
+}
 
   app_settings = {
     "WEBSITE_RUN_FROM_PACKAGE" = 0

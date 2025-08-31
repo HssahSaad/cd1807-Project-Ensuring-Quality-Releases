@@ -1,18 +1,20 @@
-provider "azurerm" {
-  tenant_id       = "${var.tenant_id}"
-  subscription_id = "${var.subscription_id}"
-  client_id       = "${var.client_id}"
-  client_secret   = "${var.client_secret}"
-  features {}
-}
 terraform {
   backend "azurerm" {
-    storage_account_name = ""
-    container_name       = ""
-    key                  = ""
-    access_key           = ""
+    storage_account_name = "tfstate3193425499"
+    container_name       = "tfstate"
+    key                  = "test.terraform.tfstate"
+    use_azuread_auth     = true
+    # resource_group_name = "Azuredevops"
   }
 }
+
+provider "azurerm" {
+  features {}
+  use_cli         = true
+  subscription_id = "96587dff-f596-4825-9e39-9563f9ff9df0"
+  tenant_id       = "defd7480-7b38-4ae4-930a-8c636058c8c7"
+}
+
 module "resource_group" {
   source               = "../../modules/resource_group"
   resource_group       = "${var.resource_group}"
@@ -30,25 +32,39 @@ module "network" {
 }
 
 module "nsg-test" {
-  source           = "../../modules/networksecuritygroup"
-  location         = "${var.location}"
-  application_type = "${var.application_type}"
-  resource_type    = "NSG"
-  resource_group   = "${module.resource_group.resource_group_name}"
-  subnet_id        = "${module.network.subnet_id_test}"
-  address_prefix_test = "${var.address_prefix_test}"
+  source              = "../../modules/networksecuritygroup"
+  location            = var.location
+  application_type    = var.application_type
+  resource_type       = "NSG"
+  resource_group      = module.resource_group.resource_group_name
+  subnet_id           = module.network.subnet_id   
+  address_prefix_test = var.address_prefix_test
 }
-module "appservice" {
-  source           = "../../modules/appservice"
-  location         = "${var.location}"
-  application_type = "${var.application_type}"
-  resource_type    = "AppService"
-  resource_group   = "${module.resource_group.resource_group_name}"
-}
+
 module "publicip" {
   source           = "../../modules/publicip"
   location         = "${var.location}"
   application_type = "${var.application_type}"
   resource_type    = "publicip"
   resource_group   = "${module.resource_group.resource_group_name}"
+}
+
+module "vm" {
+  source = "../../modules/vm"
+
+  resource_group = var.resource_group
+  location       = var.location
+
+  subnet_id    = module.network.subnet_id       # fixed here
+  public_ip_id = module.publicip.public_ip_id   # fixed here
+
+  vm_name        = "eqr-dev-vm"
+  vm_size        = "Standard_B1s"
+  admin_username = "adminuser"
+
+  tags = {
+    env     = "dev"
+    owner   = "hssah"
+    project = "eqr"
+  }
 }

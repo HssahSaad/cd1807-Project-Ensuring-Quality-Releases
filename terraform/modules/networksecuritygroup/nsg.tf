@@ -3,6 +3,12 @@ resource "azurerm_network_security_group" "nsg" {
   location            = "${var.location}"
   resource_group_name = "${var.resource_group}"
 
+  tags = {
+  env     = "dev"
+  project = "eqr"
+  owner   = "hssah"
+}
+
   security_rule {
     name                       = "${var.application_type}-${var.resource_type}-5000"
     priority                   = 100
