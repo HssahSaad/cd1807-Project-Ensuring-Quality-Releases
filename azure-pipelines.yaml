@@ -1,10 +1,18 @@
+# azure-pipelines.yml
+trigger: none   # شغّلي يدويًا
+
 pool:
-  name: myAgentPool
+  name: myAgentPool          # <-- اسم الـ self-hosted agent pool عندك
 
 variables:
-  tfVersion: '1.2.9'
-  azureServiceConnectionId: 'AzureServiceConnection'
-  System.Debug: 'true'          # 1) فعل الديبق
+  System.Debug: 'true'
+  azureServiceConnectionId: 'AzureServiceConnection'   # <-- اسم الـ Service Connection
+  TF_VERSION: '1.8.5'                                  # نسخة Terraform
+  # Backend (بدّلي القيم حسب حساب التخزين عندك)
+  TF_BACKEND_RG: 'Azuredevops'
+  TF_BACKEND_SA: 'tfstate3193425499'
+  TF_BACKEND_CONTAINER: 'tfstate'
+  TF_BACKEND_KEY: 'test.terraform.tfstate'
 
 stages:
 - stage: Build
@@ -15,48 +23,52 @@ stages:
     steps:
     - checkout: self
 
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
-      displayName: Install Terraform
-      inputs:
-        terraformVersion: '$(tfVersion)'
-
     - task: AzureCLI@2
-      displayName: Terraform init + validate + apply (OIDC)
+      displayName: Install Terraform + init/plan/apply (AAD/OIDC)
       inputs:
-        azureSubscription: '$(azureServiceConnectionId)'
+        azureSubscription: '$(azureServiceConnectionId)'   # يعمل az login تلقائيًا
         scriptType: bash
         scriptLocation: inlineScript
         addSpnToEnvironment: true
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'  # <-- مسار ملفات .tf
         inlineScript: |
-          set -euo pipefail
-          set -x  # اطبع كل الأوامر
+          set -eo pipefail
+          set -x
 
-          # 2) تفعيل OIDC لمزوّد AzureRM والباكند
-          export ARM_USE_OIDC=true
-          export ARM_CLIENT_ID="$servicePrincipalId"
-          export ARM_TENANT_ID="$tenantId"
-          export ARM_SUBSCRIPTION_ID="$subscriptionId"
-
+          echo "Agent OS:" $(uname -a)
           echo "PWD=$(pwd)"
-          echo "Listing files:"
           ls -la
 
-          # تأكيد تسجيل الدخول
-          az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
-
+          # 1) تثبيت Terraform محليًا (بدون sudo)
+          mkdir -p "$HOME/bin"
+          export PATH="$HOME/bin:$PATH"
+          if ! command -v terraform >/dev/null 2>&1; then
+            echo "Installing Terraform ${TF_VERSION} ..."
+            curl -L -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+            unzip -o /tmp/terraform.zip -d /tmp
+            mv -f /tmp/terraform "$HOME/bin/terraform"
+            chmod +x "$HOME/bin/terraform"
+          fi
           terraform --version
 
-          # 3) Backend مع AAD
+          # 2) تأكيد تسجيل الدخول والاشتراك
+          az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
+
+          # 3) تأكّد من وجود حاوية الـ tfstate (لو موجودة يرجّع True وما يوقف)
+          az storage container create \
+            --name "$(TF_BACKEND_CONTAINER)" \
+            --account-name "$(TF_BACKEND_SA)" \
+            --auth-mode login || true
+
+          # 4) Terraform init باستخدام AAD (بدون access keys)
           terraform init -input=false -no-color \
-            -backend-config="resource_group_name=Azuredevops" \
-            -backend-config="storage_account_name=tfstate3193425499" \
-            -backend-config="container_name=tfstate" \
-            -backend-config="key=test.terraform.tfstate" \
+            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
+            -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
+            -backend-config="container_name=$(TF_BACKEND_CONTAINER)" \
+            -backend-config="key=$(TF_BACKEND_KEY)" \
             -backend-config="use_azuread_auth=true"
 
+          # 5) Validate + Plan + Apply
           terraform validate -no-color
-
           terraform plan -input=false -no-color -out=tfplan
-
           terraform apply -input=false -no-color -auto-approve tfplan
