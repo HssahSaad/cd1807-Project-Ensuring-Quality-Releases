@@ -30,7 +30,6 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         addSpnToEnvironment: true
-        # ✅ Use the repo root variable and let the task cd for us
         workingDirectory: '$(Build.SourcesDirectory)/terraform/environments/test'
         inlineScript: |
           set -eo pipefail
@@ -40,39 +39,33 @@ stages:
           echo "BUILD_SOURCESDIRECTORY=$BUILD_SOURCESDIRECTORY"
           echo "PWD=$(pwd)"
           ls -la
-          echo "Tree (one level up):"
-          ls -la ..
 
-          # sanity check
-          if [ ! -f "./main.tf" ]; then
-            echo "ERROR: main.tf not found in $(pwd)"
-            exit 2
-          fi
+          # ---- OIDC for Terraform (critical) ----
+          export ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_SUBSCRIPTION_ID="$subscriptionId"
 
-          # 1) Install Terraform locally (no sudo/unzip needed)
+          # 1) Install the exact Terraform version (overwrite any preinstalled one)
           mkdir -p "$HOME/bin"
           export PATH="$HOME/bin:$PATH"
-          if ! command -v terraform >/dev/null 2>&1; then
-            echo "Installing Terraform ${TF_VERSION} ..."
-            TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
-            curl -L -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
-            # ✅ Safe unzip without heredoc or complex quoting
-            python3 -m zipfile -e "$TF_ZIP" /tmp
-            mv -f /tmp/terraform "$HOME/bin/terraform"
-            chmod +x "$HOME/bin/terraform"
-          fi
+          TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
+          curl -sSL -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+          python3 -m zipfile -e "$TF_ZIP" /tmp
+          mv -f /tmp/terraform "$HOME/bin/terraform"
+          chmod +x "$HOME/bin/terraform"
           terraform --version
 
           # 2) Confirm Azure login from service connection
           az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
 
-          # 3) Ensure tfstate container exists
+          # 3) Ensure tfstate container exists (needs Blob Data Contributor on the SA)
           az storage container create \
             --name "$(TF_BACKEND_CONTAINER)" \
             --account-name "$(TF_BACKEND_SA)" \
             --auth-mode login >/dev/null 2>&1 || true
 
-          # 4) Terraform init using AAD (no access keys)
+          # 4) Terraform init using AAD (OIDC)
           echo "=== Terraform INIT ==="
           terraform init -input=false -no-color \
             -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
