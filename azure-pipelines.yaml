@@ -53,13 +53,13 @@ stages:
             TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
             curl -L -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
             python3 - <<'PY'
-            import os, zipfile
-            ver = os.environ.get("TF_VERSION","1.8.5")
-            src = f"/tmp/terraform_{ver}_linux_amd64.zip"
-            with zipfile.ZipFile(src, 'r') as z:
-            z.extractall("/tmp")
-            print("Extracted Terraform to /tmp")
-            PY
+import os, zipfile
+ver = os.environ.get("TF_VERSION","1.8.5")
+src = f"/tmp/terraform_{ver}_linux_amd64.zip"
+with zipfile.ZipFile(src, 'r') as z:
+    z.extractall("/tmp")
+print("Extracted Terraform to /tmp")
+PY
             mv -f /tmp/terraform "$HOME/bin/terraform"
             chmod +x "$HOME/bin/terraform"
           fi
