@@ -2,14 +2,13 @@
 trigger: none
 
 pool:
-  name: myAgentPool        # self-hosted agent pool
+  name: myAgentPool
 
 variables:
   System.Debug: 'true'
-  azureServiceConnectionId: 'AzureServiceConnection'  # Service Connection (ARM + OIDC)
+  azureServiceConnectionId: 'AzureServiceConnection'
   TF_VERSION: '1.8.5'
 
-  # Backend settings
   TF_BACKEND_RG: 'Azuredevops'
   TF_BACKEND_SA: 'tfstate3193425499'
   TF_BACKEND_CONTAINER: 'tfstate'
@@ -31,10 +30,12 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         addSpnToEnvironment: true
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
         inlineScript: |
           set -eo pipefail
           set -x
+
+          # Ensure we're in the folder that contains main.tf
+          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test" || { echo "Bad path"; exit 2; }
 
           echo "PWD=$(pwd)"
           ls -la
