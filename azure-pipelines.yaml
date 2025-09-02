@@ -2,13 +2,10 @@ pool:
   name: myAgentPool
 
 variables:
-  azureServiceConnectionId: AzureServiceConnection
+  python.version: '3.7.6'
+  azureServiceConnectionId: 'AzureServiceConnection'
   projectRoot: $(System.DefaultWorkingDirectory)
-  backendRg: Azuredevops
-  backendSa: tfstate3193425499
-  backendContainer: tfstate
-  backendKey: test.terraform.tfstate
-  tfVersion: 1.2.9
+  environmentName: 'test'
 
 stages:
 - stage: Build
@@ -18,40 +15,33 @@ stages:
     displayName: Build Infrastructure
     steps:
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
-      displayName: Terraform installation
+      displayName: 'Terraform installation'
       inputs:
-        terraformVersion: '$(tfVersion)'
+        terraformVersion: '1.2.9'
 
-    - task: AzureCLI@2
-      displayName: Terraform init + validate + apply
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform init'
       inputs:
-        azureSubscription: '$(azureServiceConnectionId)'
-        addSpnToEnvironment: true
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        backendServiceArm: '$(azureServiceConnectionId)'
+        backendAzureRmResourceGroupName: 'Azuredevops'
+        backendAzureRmStorageAccountName: 'tfstate3193425499'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'test.terraform.tfstate'
 
-          if [ -n "$AZURE_FEDERATED_TOKEN_FILE" ]; then
-            export ARM_USE_OIDC=true
-            export ARM_OIDC_TOKEN_FILE="$AZURE_FEDERATED_TOKEN_FILE"
-            export ARM_CLIENT_ID="$servicePrincipalId"
-            export ARM_TENANT_ID="$tenantId"
-            export ARM_SUBSCRIPTION_ID="$subscriptionId"
-          else
-            export ARM_CLIENT_ID="$servicePrincipalId"
-            export ARM_CLIENT_SECRET="$servicePrincipalKey"
-            export ARM_TENANT_ID="$tenantId"
-            export ARM_SUBSCRIPTION_ID="$subscriptionId"
-          fi
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform validate'
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
 
-          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
-
-          terraform init \
-            -backend-config="resource_group_name=$(backendRg)" \
-            -backend-config="storage_account_name=$(backendSa)" \
-            -backend-config="container_name=$(backendContainer)" \
-            -backend-config="key=$(backendKey)"
-
-          terraform validate
-          terraform apply -auto-approve
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform apply'
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
