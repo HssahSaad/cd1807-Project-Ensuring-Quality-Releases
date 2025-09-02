@@ -2,10 +2,11 @@ pool:
   name: myAgentPool
 
 variables:
-  python.version: '3.7.6'
+  tfVersion: '1.2.9'
   azureServiceConnectionId: 'AzureServiceConnection'
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
+  tfWorkDir: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
 
 stages:
 - stage: Build
@@ -14,36 +15,45 @@ stages:
   - job: BuildInfrastructure
     displayName: Build Infrastructure
     steps:
+
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
-      displayName: 'Terraform installation'
+      displayName: Terraform installation
       inputs:
-        terraformVersion: '1.2.9'
+        terraformVersion: '$(tfVersion)'
 
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-      displayName: 'Terraform init'
+    # تسجيل الدخول عبر خدمة Azure والتمرير كـ OIDC للـ provider/back-end
+    - task: AzureCLI@2
+      displayName: Terraform init + validate + apply (OIDC)
       inputs:
-        provider: 'azurerm'
-        command: 'init'
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-        backendServiceArm: '$(azureServiceConnectionId)'
-        backendAzureRmResourceGroupName: 'Azuredevops'
-        backendAzureRmStorageAccountName: 'tfstate3193425499'
-        backendAzureRmContainerName: 'tfstate'
-        backendAzureRmKey: 'test.terraform.tfstate'
-        commandOptions: '-reconfigure'
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        workingDirectory: '$(tfWorkDir)'
+        addSpnToEnvironment: true
+        inlineScript: |
+          set -e
 
+          terraform --version
 
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-      displayName: 'Terraform validate'
-      inputs:
-        provider: 'azurerm'
-        command: 'validate'
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+          # تفعيل OIDC للـ azurerm (backend + provider)
+          export ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_SUBSCRIPTION_ID="$subscriptionId"
 
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-      displayName: 'Terraform apply'
-      inputs:
-        provider: 'azurerm'
-        command: 'apply'
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+          echo "Init backend..."
+          terraform init -reconfigure \
+            -backend-config="resource_group_name=Azuredevops" \
+            -backend-config="storage_account_name=tfstate3193425499" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=test.terraform.tfstate" \
+            -backend-config="use_azuread_auth=true"
+
+          echo "Validate..."
+          terraform validate
+
+          echo "Plan..."
+          terraform plan -out=tfplan
+
+          echo "Apply..."
+          terraform apply -auto-approve tfplan
