@@ -4,7 +4,7 @@ pool:
 variables:
   python.version: '3.7.6'
   azureServiceConnectionId: 'AzureServiceConnection'
-  projectRoot: $(System.DefaultWorkingDirectory)
+  projectRoot: '$(System.DefaultWorkingDirectory)'
   environmentName: 'test'
 
 stages:
@@ -14,38 +14,35 @@ stages:
   - job: BuildInfrastructure
     displayName: Build Infrastructure
     steps:
-    # Terraform install (اختياري)
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
-      displayName: 'Terraform installation'
-      inputs:
-        terraformVersion: '1.2.9'
+      - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+        displayName: Terraform installation
+        inputs:
+          terraformVersion: '1.2.9'
 
-    # Terraform init
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-      displayName: 'Terraform init'
-      inputs:
-        provider: 'azurerm'
-        command: 'init'
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-        backendServiceArm: '$(azureServiceConnectionId)'
-        backendAzureRmResourceGroupName: 'Azuredevops'
-        backendAzureRmStorageAccountName: 'tfstate3193425499'
-        backendAzureRmContainerName: 'tfstate'
-        backendAzureRmKey: 'test.terraform.tfstate'
+      - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+        displayName: Terraform init
+        inputs:
+          provider: azurerm
+          command: init
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+          backendServiceArm: '$(azureServiceConnectionId)'
+          backendAzureRmResourceGroupName: Azuredevops
+          backendAzureRmStorageAccountName: tfstate3193425499
+          backendAzureRmContainerName: tfstate
+          backendAzureRmKey: test.terraform.tfstate
 
+      - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+        displayName: Terraform validate
+        inputs:
+          provider: azurerm
+          command: validate
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
 
-    # Terraform validate 
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-      displayName: 'Terraform validate'
-      inputs:
-        provider: 'azurerm'
-        command: 'validate'
-
-    # Terraform apply
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-      displayName: 'Terraform apply'
-      inputs:
-        provider: 'azurerm'
-        command: 'apply'
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+      - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+        displayName: Terraform apply
+        inputs:
+          provider: azurerm
+          command: apply
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+          environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+          commandOptions: '-auto-approve'
