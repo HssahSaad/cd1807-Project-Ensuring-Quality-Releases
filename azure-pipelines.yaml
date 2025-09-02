@@ -2,14 +2,14 @@
 trigger: none
 
 pool:
-  name: myAgentPool        # <-- اسم الـ self-hosted agent pool
+  name: myAgentPool        # self-hosted agent pool
 
 variables:
   System.Debug: 'true'
-  azureServiceConnectionId: 'AzureServiceConnection'  # <-- اسم الـ Service Connection (ARM + OIDC)
+  azureServiceConnectionId: 'AzureServiceConnection'  # Service Connection (ARM + OIDC)
   TF_VERSION: '1.8.5'
 
-  # Backend (عدّليها لو الأسماء مختلفة)
+  # Backend settings
   TF_BACKEND_RG: 'Azuredevops'
   TF_BACKEND_SA: 'tfstate3193425499'
   TF_BACKEND_CONTAINER: 'tfstate'
@@ -31,57 +31,22 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         addSpnToEnvironment: true
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'  # <-- تأكدي أن فيه main.tf
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
         inlineScript: |
           set -eo pipefail
           set -x
 
-          echo "=== Agent info ==="
-          uname -a || true
           echo "PWD=$(pwd)"
           ls -la
-
-          # ensure Terraform files exist
           if [ ! -f "./main.tf" ]; then
             echo "ERROR: main.tf not found in $(pwd)"
             exit 2
           fi
 
-          # 1) install Terraform locally (no sudo/unzip needed)
+          # 1) Install Terraform locally (no sudo/unzip needed)
           mkdir -p "$HOME/bin"
           export PATH="$HOME/bin:$PATH"
           if ! command -v terraform >/dev/null 2>&1; then
             echo "Installing Terraform ${TF_VERSION} ..."
             TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
-            curl -L -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
-          python3 - <<'PY'
-            import os, zipfile
-            ver = os.environ.get("TF_VERSION","1.8.5")
-            src = f"/tmp/terraform_{ver}_linux_amd64.zip"
-          with zipfile.ZipFile(src, 'r') as z: z.extractall("/tmp")
-          print("Extracted Terraform to /tmp")
-          PY
-            mv -f /tmp/terraform "$HOME/bin/terraform"
-            chmod +x "$HOME/bin/terraform"
-          fi
-          terraform --version
-
-          az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
-
-          az storage container create \
-            --name "$(TF_BACKEND_CONTAINER)" \
-            --account-name "$(TF_BACKEND_SA)" \
-            --auth-mode login >/dev/null 2>&1 || true
-
-          # 4) terraform init using AAD (no access keys)
-          terraform init -input=false -no-color \
-            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
-            -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
-            -backend-config="container_name=$(TF_BACKEND_CONTAINER)" \
-            -backend-config="key=$(TF_BACKEND_KEY)" \
-            -backend-config="use_azuread_auth=true"
-
-          # 5) validate + plan + apply
-          terraform validate -no-color
-          terraform plan -input=false -no-color -out=tfplan
-          terraform apply -input=false -no-color -auto-approve tfplan
+            cu
