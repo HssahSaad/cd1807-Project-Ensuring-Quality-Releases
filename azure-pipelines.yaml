@@ -2,10 +2,13 @@ pool:
   name: myAgentPool
 
 variables:
-  python.version: '3.7.6'
-  azureServiceConnectionId: 'AzureServiceConnection'
+  azureServiceConnectionId: AzureServiceConnection
   projectRoot: $(System.DefaultWorkingDirectory)
-  environmentName: 'test'
+  backendRg: Azuredevops
+  backendSa: tfstate3193425499
+  backendContainer: tfstate
+  backendKey: test.terraform.tfstate
+  tfVersion: 1.2.9
 
 stages:
 - stage: Build
@@ -17,44 +20,24 @@ stages:
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
       displayName: Terraform installation
       inputs:
-        terraformVersion: '1.2.9'
+        terraformVersion: '$(tfVersion)'
 
     - task: AzureCLI@2
-      displayName: Terraform init (AzureAD auth)
+      displayName: Terraform init + validate + apply (logged in via service connection)
       inputs:
-        azureSubscription: $(azureServiceConnectionId)
+        azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          set -euo pipefail
-          cd '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-          terraform --version
-          az account show -o table
+          set -e
+          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+
           terraform init \
-            -backend-config="resource_group_name=Azuredevops" \
-            -backend-config="storage_account_name=tfstate3193425499" \
-            -backend-config="container_name=tfstate" \
-            -backend-config="key=test.terraform.tfstate" \
-            -backend-config="use_azuread_auth=true"
+            -backend-config="resource_group_name=$(backendRg)" \
+            -backend-config="storage_account_name=$(backendSa)" \
+            -backend-config="container_name=$(backendContainer)" \
+            -backend-config="key=$(backendKey)"
 
-    - task: AzureCLI@2
-      displayName: Terraform validate
-      inputs:
-        azureSubscription: $(azureServiceConnectionId)
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -euo pipefail
-          cd '$(System.DefaultWorkingDirectory)/terraform/environments/test'
           terraform validate
 
-    - task: AzureCLI@2
-      displayName: Terraform apply
-      inputs:
-        azureSubscription: $(azureServiceConnectionId)
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -euo pipefail
-          cd '$(System.DefaultWorkingDirectory)/terraform/environments/test'
           terraform apply -auto-approve
