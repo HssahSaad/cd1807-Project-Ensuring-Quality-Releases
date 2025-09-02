@@ -1,14 +1,15 @@
 # azure-pipelines.yml
-trigger: none   # شغّلي يدويًا
+trigger: none
 
 pool:
-  name: myAgentPool          # <-- اسم الـ self-hosted agent pool عندك
+  name: myAgentPool   # <-- اسم الـ self-hosted agent pool
 
 variables:
   System.Debug: 'true'
-  azureServiceConnectionId: 'AzureServiceConnection'   # <-- اسم الـ Service Connection
-  TF_VERSION: '1.8.5'                                  # نسخة Terraform
-  # Backend (بدّلي القيم حسب حساب التخزين عندك)
+  azureServiceConnectionId: 'AzureServiceConnection'   # <-- اسم الـ Service Connection (OIDC)
+  TF_VERSION: '1.8.5'
+
+  # إعدادات الـ backend (عدّليها حسب حساب التخزين عندك)
   TF_BACKEND_RG: 'Azuredevops'
   TF_BACKEND_SA: 'tfstate3193425499'
   TF_BACKEND_CONTAINER: 'tfstate'
@@ -16,51 +17,67 @@ variables:
 
 stages:
 - stage: Build
-  displayName: Build
   jobs:
   - job: BuildInfrastructure
-    displayName: Build Infrastructure
     steps:
     - checkout: self
 
     - task: AzureCLI@2
       displayName: Install Terraform + init/plan/apply (AAD/OIDC)
       inputs:
-        azureSubscription: '$(azureServiceConnectionId)'   # يعمل az login تلقائيًا
+        azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
         scriptLocation: inlineScript
         addSpnToEnvironment: true
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'  # <-- مسار ملفات .tf
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
         inlineScript: |
           set -eo pipefail
           set -x
 
-          echo "Agent OS:" $(uname -a)
+          echo "=== Agent info ==="
+          uname -a || true
           echo "PWD=$(pwd)"
-          ls -la
+          echo "Tree:"
+          ls -la || true
 
-          # 1) تثبيت Terraform محليًا (بدون sudo)
+          # تحقق من وجود ملفات Terraform
+          if [ ! -f "./main.tf" ]; then
+            echo "ERROR: main.tf غير موجود في $(pwd). صححي workingDirectory أو أضيفي ملفات .tf."
+            exit 2
+          fi
+
+          # 1) تثبيت Terraform بدون اعتماد على unzip أو sudo (باستخدام Python)
           mkdir -p "$HOME/bin"
           export PATH="$HOME/bin:$PATH"
           if ! command -v terraform >/dev/null 2>&1; then
             echo "Installing Terraform ${TF_VERSION} ..."
-            curl -L -o /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
-            unzip -o /tmp/terraform.zip -d /tmp
+            TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
+            curl -L -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+
+            # فك الضغط عبر Python (يتجنب الاعتماد على unzip)
+            python3 - <<'PY'
+            import zipfile, sys, os
+            src = "/tmp/terraform_1.8.5_linux_amd64.zip".replace("1.8.5", os.environ.get("TF_VERSION","1.8.5"))
+            dst = "/tmp"
+          with zipfile.ZipFile(src, 'r') as z:
+          z.extractall(dst)
+          print("Extracted to", dst)
+          PY
             mv -f /tmp/terraform "$HOME/bin/terraform"
             chmod +x "$HOME/bin/terraform"
           fi
           terraform --version
 
-          # 2) تأكيد تسجيل الدخول والاشتراك
+          # 2) تأكيد الدخول من الـ Service Connection
           az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
 
-          # 3) تأكّد من وجود حاوية الـ tfstate (لو موجودة يرجّع True وما يوقف)
+          # 3) ضمان وجود حاوية tfstate (يتطلب RBAC: Storage Blob Data Contributor)
           az storage container create \
             --name "$(TF_BACKEND_CONTAINER)" \
             --account-name "$(TF_BACKEND_SA)" \
             --auth-mode login || true
 
-          # 4) Terraform init باستخدام AAD (بدون access keys)
+          # 4) Terraform init باستخدام AAD للـ backend (بدون access keys)
           terraform init -input=false -no-color \
             -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
             -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
