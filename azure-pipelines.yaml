@@ -4,7 +4,7 @@ pool:
 variables:
   python.version: '3.7.6'
   azureServiceConnectionId: 'AzureServiceConnection'
-  projectRoot: '$(System.DefaultWorkingDirectory)'
+  projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
 
 stages:
@@ -14,35 +14,47 @@ stages:
   - job: BuildInfrastructure
     displayName: Build Infrastructure
     steps:
-      - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
-        displayName: Terraform installation
-        inputs:
-          terraformVersion: '1.2.9'
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: Terraform installation
+      inputs:
+        terraformVersion: '1.2.9'
 
-      - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-        displayName: Terraform init
-        inputs:
-          provider: azurerm
-          command: init
-          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-          backendServiceArm: '$(azureServiceConnectionId)'
-          backendAzureRmResourceGroupName: Azuredevops
-          backendAzureRmStorageAccountName: tfstate3193425499
-          backendAzureRmContainerName: tfstate
-          backendAzureRmKey: test.terraform.tfstate
+    - task: AzureCLI@2
+      displayName: Terraform init (AzureAD auth)
+      inputs:
+        azureSubscription: $(azureServiceConnectionId)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          cd '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+          terraform --version
+          az account show -o table
+          terraform init \
+            -backend-config="resource_group_name=Azuredevops" \
+            -backend-config="storage_account_name=tfstate3193425499" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=test.terraform.tfstate" \
+            -backend-config="use_azuread_auth=true"
 
-      - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-        displayName: Terraform validate
-        inputs:
-          provider: azurerm
-          command: validate
-          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+    - task: AzureCLI@2
+      displayName: Terraform validate
+      inputs:
+        azureSubscription: $(azureServiceConnectionId)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          cd '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+          terraform validate
 
-      - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-        displayName: Terraform apply
-        inputs:
-          provider: azurerm
-          command: apply
-          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-          environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
-          commandOptions: '-auto-approve'
+    - task: AzureCLI@2
+      displayName: Terraform apply
+      inputs:
+        azureSubscription: $(azureServiceConnectionId)
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          cd '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+          terraform apply -auto-approve
