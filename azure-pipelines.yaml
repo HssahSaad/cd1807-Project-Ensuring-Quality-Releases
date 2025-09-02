@@ -1,5 +1,5 @@
 pool:
-  name: myAgentPool
+  name: myAgentPool   # self-hosted
 
 variables:
   tfVersion: '1.2.9'
@@ -13,25 +13,36 @@ stages:
   - job: BuildInfrastructure
     displayName: Build Infrastructure
     steps:
+    - checkout: self
+
+    # تثبيت Terraform
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
-      displayName: Terraform installation
+      displayName: Install Terraform
       inputs:
         terraformVersion: '$(tfVersion)'
 
+    # تشغيل Terraform عبر Azure CLI مع OIDC
     - task: AzureCLI@2
       displayName: Terraform init + validate + apply (OIDC)
       inputs:
         azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
+        scriptLocation: inlineScript   # << التصحيح المهم
         addSpnToEnvironment: true
-        script: |
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        inlineScript: |
+          set -euo pipefail
+
+          # تفعيل OIDC للـ Terraform
           export ARM_USE_OIDC=true
           export ARM_CLIENT_ID="$servicePrincipalId"
           export ARM_TENANT_ID="$tenantId"
           export ARM_SUBSCRIPTION_ID="$subscriptionId"
 
-          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+          echo "Running in: $(pwd)"
+          ls -la
 
+          terraform --version
           terraform init \
             -backend-config="resource_group_name=Azuredevops" \
             -backend-config="storage_account_name=tfstate3193425499" \
