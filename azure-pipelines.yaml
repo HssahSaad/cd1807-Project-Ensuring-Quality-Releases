@@ -49,4 +49,31 @@ stages:
           if ! command -v terraform >/dev/null 2>&1; then
             echo "Installing Terraform ${TF_VERSION} ..."
             TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
-            cu
+            curl -L -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+            python3 -m zipfile -e "$TF_ZIP" /tmp
+            mv -f /tmp/terraform "$HOME/bin/terraform"
+            chmod +x "$HOME/bin/terraform"
+          fi
+          terraform --version
+
+          # 2) Confirm Azure login from service connection
+          az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
+
+          # 3) Ensure tfstate container exists (requires Blob Data Contributor)
+          az storage container create \
+            --name "$(TF_BACKEND_CONTAINER)" \
+            --account-name "$(TF_BACKEND_SA)" \
+            --auth-mode login >/dev/null 2>&1 || true
+
+          # 4) Terraform init using AAD (no access keys)
+          terraform init -input=false -no-color \
+            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
+            -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
+            -backend-config="container_name=$(TF_BACKEND_CONTAINER)" \
+            -backend-config="key=$(TF_BACKEND_KEY)" \
+            -backend-config="use_azuread_auth=true"
+
+          # 5) Validate + Plan + Apply
+          terraform validate -no-color
+          terraform plan -input=false -no-color -out=tfplan
+          terraform apply -input=false -no-color -auto-approve tfplan
