@@ -30,15 +30,20 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         addSpnToEnvironment: true
+        # ✅ Use the repo root variable and let the task cd for us
+        workingDirectory: '$(Build.SourcesDirectory)/terraform/environments/test'
         inlineScript: |
           set -eo pipefail
           set -x
 
-          # Ensure we're in the folder that contains main.tf
-          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test" || { echo "Bad path"; exit 2; }
-
+          echo "=== DEBUG ==="
+          echo "BUILD_SOURCESDIRECTORY=$BUILD_SOURCESDIRECTORY"
           echo "PWD=$(pwd)"
           ls -la
+          echo "Tree (one level up):"
+          ls -la ..
+
+          # sanity check
           if [ ! -f "./main.tf" ]; then
             echo "ERROR: main.tf not found in $(pwd)"
             exit 2
@@ -51,6 +56,7 @@ stages:
             echo "Installing Terraform ${TF_VERSION} ..."
             TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
             curl -L -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+            # ✅ Safe unzip without heredoc or complex quoting
             python3 -m zipfile -e "$TF_ZIP" /tmp
             mv -f /tmp/terraform "$HOME/bin/terraform"
             chmod +x "$HOME/bin/terraform"
@@ -60,13 +66,14 @@ stages:
           # 2) Confirm Azure login from service connection
           az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
 
-          # 3) Ensure tfstate container exists (requires Blob Data Contributor)
+          # 3) Ensure tfstate container exists
           az storage container create \
             --name "$(TF_BACKEND_CONTAINER)" \
             --account-name "$(TF_BACKEND_SA)" \
             --auth-mode login >/dev/null 2>&1 || true
 
           # 4) Terraform init using AAD (no access keys)
+          echo "=== Terraform INIT ==="
           terraform init -input=false -no-color \
             -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
             -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
