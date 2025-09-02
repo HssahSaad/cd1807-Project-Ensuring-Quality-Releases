@@ -2,12 +2,14 @@
 trigger: none
 
 pool:
-  name: myAgentPool
+  name: myAgentPool        # <-- اسم الـ self-hosted agent pool
 
 variables:
   System.Debug: 'true'
-  azureServiceConnectionId: 'AzureServiceConnection'
+  azureServiceConnectionId: 'AzureServiceConnection'  # <-- اسم الـ Service Connection (ARM + OIDC)
   TF_VERSION: '1.8.5'
+
+  # Backend (عدّليها لو الأسماء مختلفة)
   TF_BACKEND_RG: 'Azuredevops'
   TF_BACKEND_SA: 'tfstate3193425499'
   TF_BACKEND_CONTAINER: 'tfstate'
@@ -29,7 +31,7 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         addSpnToEnvironment: true
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'  # <-- تأكدي أن فيه main.tf
         inlineScript: |
           set -eo pipefail
           set -x
@@ -45,7 +47,7 @@ stages:
             exit 2
           fi
 
-          # install Terraform locally (no sudo/unzip required)
+          # 1) install Terraform locally (no sudo/unzip needed)
           mkdir -p "$HOME/bin"
           export PATH="$HOME/bin:$PATH"
           if ! command -v terraform >/dev/null 2>&1; then
@@ -65,16 +67,16 @@ PY
           fi
           terraform --version
 
-          # confirm Azure login from service connection
+          # 2) confirm Azure login (from Service Connection)
           az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
 
-          # create tfstate container if missing (requires Blob Data Contributor)
+          # 3) create tfstate container if missing (requires Blob Data Contributor on SA)
           az storage container create \
             --name "$(TF_BACKEND_CONTAINER)" \
             --account-name "$(TF_BACKEND_SA)" \
             --auth-mode login >/dev/null 2>&1 || true
 
-          # terraform init using AAD (no access keys)
+          # 4) terraform init using AAD (no access keys)
           terraform init -input=false -no-color \
             -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
             -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
@@ -82,6 +84,7 @@ PY
             -backend-config="key=$(TF_BACKEND_KEY)" \
             -backend-config="use_azuread_auth=true"
 
+          # 5) validate + plan + apply
           terraform validate -no-color
           terraform plan -input=false -no-color -out=tfplan
           terraform apply -input=false -no-color -auto-approve tfplan
