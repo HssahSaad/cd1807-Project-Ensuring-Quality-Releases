@@ -21,11 +21,11 @@ resource "azurerm_linux_virtual_machine" "vm" {
   network_interface_ids = [azurerm_network_interface.vm_nic.id]
   tags                = var.tags
 
-  admin_ssh_key {
-    username   = var.admin_username
-    public_key = var.admin_ssh_public_key
+admin_ssh_key {
+  username   = var.admin_username
+  public_key = var.admin_ssh_public_key
+}
 
-  }
 
   os_disk {
     caching              = "ReadWrite"
