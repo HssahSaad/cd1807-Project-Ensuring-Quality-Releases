@@ -62,6 +62,8 @@ module "vm" {
   vm_size        = "Standard_B1s"
   admin_username = "adminuser"
 
+  admin_ssh_public_key = var.admin_ssh_public_key
+
   tags = {
     env     = "dev"
     owner   = "hssah"
