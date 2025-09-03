@@ -20,15 +20,16 @@ stages:
   jobs:
   - job: BuildInfrastructure
     displayName: Build Infrastructure
-    timeoutInMinutes: 180          # job timeout (3 hours)
-    cancelTimeoutInMinutes: 5
+    timeoutInMinutes: 120
     steps:
     - checkout: self
 
-    # STEP 1: Terraform INIT + VALIDATE + PLAN
+    # ==============================
+    # Terraform INIT + VALIDATE + PLAN
+    # ==============================
     - task: AzureCLI@2
       displayName: Terraform INIT/VALIDATE/PLAN
-      timeoutInMinutes: 60
+      timeoutInMinutes: 120
       inputs:
         azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
@@ -39,24 +40,26 @@ stages:
           set -eo pipefail
           set -x
 
-          echo "=== DEBUG: Starting Terraform PLAN ==="
-          echo "Working dir: $(pwd)"
+          # keepalive loop so DevOps doesn't cancel on silence
+          while true; do echo "Still running Terraform INIT/PLAN... $(date)"; sleep 300; done &
 
-          # ---- OIDC for Terraform ----
+          echo "=== DEBUG: Starting Terraform PLAN ==="
+
+          # ---- OIDC authentication
           export ARM_USE_OIDC=true
           export ARM_CLIENT_ID="$servicePrincipalId"
           export ARM_TENANT_ID="$tenantId"
           export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
           export ARM_OIDC_TOKEN="$idToken"
 
-          # Generate ephemeral SSH key (passed into TF var automatically)
+          # ---- Ephemeral SSH key
           mkdir -p "$HOME/.ssh"
           ssh-keygen -t rsa -b 4096 -N "" -f "$HOME/.ssh/azdo_ephemeral" -q
           ADMIN_PUB_KEY="$(cat "$HOME/.ssh/azdo_ephemeral.pub")"
           export TF_VAR_admin_ssh_public_key="$ADMIN_PUB_KEY"
           export TF_VAR_admin_username="azureuser"
 
-          # Install Terraform
+          # ---- Install Terraform
           mkdir -p "$HOME/bin"
           export PATH="$HOME/bin:$PATH"
           TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
@@ -66,16 +69,7 @@ stages:
           chmod +x "$HOME/bin/terraform"
           terraform --version
 
-          # Confirm Azure login
-          az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
-
-          # Ensure tfstate container exists
-          az storage container create \
-            --name "$(TF_BACKEND_CONTAINER)" \
-            --account-name "$(TF_BACKEND_SA)" \
-            --auth-mode login >/dev/null 2>&1 || true
-
-          # Terraform INIT
+          # ---- Terraform init
           terraform init -input=false -no-color \
             -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
             -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
@@ -83,11 +77,13 @@ stages:
             -backend-config="key=$(TF_BACKEND_KEY)" \
             -backend-config="use_azuread_auth=true"
 
-          # Terraform VALIDATE + PLAN
+          # ---- Terraform validate & plan
           terraform validate -no-color
           terraform plan -input=false -no-color -out=tfplan
 
-    # STEP 2: Terraform APPLY
+    # ==============================
+    # Terraform APPLY
+    # ==============================
     - task: AzureCLI@2
       displayName: Terraform APPLY
       timeoutInMinutes: 120
@@ -101,17 +97,15 @@ stages:
           set -eo pipefail
           set -x
 
-          echo "=== DEBUG: Starting Terraform APPLY ==="
+          while true; do echo "Still running Terraform APPLY... $(date)"; sleep 300; done &
 
-          # Re-export OIDC vars (new shell per task)
           export ARM_USE_OIDC=true
           export ARM_CLIENT_ID="$servicePrincipalId"
           export ARM_TENANT_ID="$tenantId"
           export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
           export ARM_OIDC_TOKEN="$idToken"
 
-          # Re-install Terraform quickly (if PATH reset)
-          terraform --version || true
+          export TF_VAR_admin_username="azureuser"
 
-          # Run APPLY with parallelism to speed up
-          terraform apply -input=false -no-color -auto-approve -parallelism=10 tfplan
+          # Apply from saved plan
+          terraform apply -input=false -no-color -auto-approve tfplan
