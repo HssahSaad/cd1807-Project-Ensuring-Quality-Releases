@@ -14,8 +14,13 @@ variable virtual_network_name {}
 variable address_prefix_test {}
 variable address_space {}
 
-variable "admin_ssh_public_key" {
+variable "admin_username" {
   type = string
+}
+
+variable "admin_ssh_public_key" {
+  type        = string
+  description = "The SSH public key text (contents of id_rsa.pub)"
 }
 
 
