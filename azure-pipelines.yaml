@@ -1,3 +1,7 @@
+# =========================
+# azure-pipelines.yaml
+# =========================
+
 trigger:
   branches:
     include:
@@ -7,76 +11,111 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  # اسم خدمة الاتصال اللي عندك (شفت إن اسمها AzureServiceConnection)
+  # اسم خدمة الاتصال (Service connection) في Project Settings > Service connections
   AZURE_SERVICE_CONNECTION: "AzureServiceConnection"
 
-  # مجلد Terraform داخل الريبو
+  # مجلد ملفات Terraform داخل الريبو
   TF_WORKDIR: "terraform"
 
-  # قيَم مواردك (تقدر تغيّرها)
-  PROJECT_NAME: "qa-demo"
+  # نسخة Terraform التي سنثبتها يدوياً
+  TF_VERSION: "1.6.6"
+
+  # متغيرات للبنية التحتية (عدّلها لتناسبك)
+  PROJECT_NAME: "qa-project"
   LOCATION: "eastus"
-  RESOURCE_GROUP_NAME: "qa-demo-rg"
-  WEBAPP_NAME: "qa-demo-webapp-${{ variables['Build.SourceBranchName'] }}"
+  RESOURCE_GROUP_NAME: "qa-rg"
+  WEBAPP_NAME: "qa-fakerestapi-$(Build.SourceVersion)"
 
 stages:
-# ========== Stage 1: Build & Terraform ==========
+# ----------------------------------------------------
+# 1) Build & Terraform
+# ----------------------------------------------------
 - stage: BuildAndTerraform
   displayName: "Build & Terraform"
   jobs:
   - job: Terraform
-    displayName: "Terraform Plan & Apply"
+    displayName: "Terraform init/plan/apply"
     steps:
-    - checkout: self
+      - checkout: self
+        clean: true
 
-    # تثبيت Terraform
-    - task: TerraformInstaller@1
-      displayName: "Install Terraform 1.6.6"
-      inputs:
-        terraformVersion: "1.6.6"
-
-    # تشغيل أوامر Terraform داخل سياق Azure CLI (يضمن المصادقة عبر Service Connection)
-    - task: AzureCLI@2
-      displayName: "Terraform init/plan/apply"
-      inputs:
-        azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
+      # أدوات أساسية
+      - bash: |
           set -e
-          cd "$(TF_WORKDIR)"
+          sudo apt-get update -y
+          sudo apt-get install -y curl unzip jq
+        displayName: "Install base tools"
 
-          # إنشاء/تحديث ملف variables.auto.tfvars من متغيرات البايبلاين
-          cat > variables.auto.tfvars <<EOF
-          project_name        = "${PROJECT_NAME}"
-          location            = "${LOCATION}"
-          resource_group_name = "${RESOURCE_GROUP_NAME}"
-          webapp_name         = "${WEBAPP_NAME}"
-          EOF
+      # تثبيت Terraform يدوياً (بدون أي Tasks من Marketplace)
+      - bash: |
+          set -euxo pipefail
+          echo "==> Installing Terraform $(TF_VERSION)"
+          curl -fsSL -o tf.zip "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
+          sudo unzip -o tf.zip -d /usr/local/bin
+          rm -f tf.zip
+          terraform version
+        displayName: "Install Terraform"
 
-          echo "==> terraform init"
-          terraform init -upgrade
+      # خطوة تشخيصية كاملة عبر AzureCLI
+      - task: AzureCLI@2
+        displayName: "Terraform init/plan/apply (diagnostic)"
+        inputs:
+          azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
 
-          echo "==> terraform validate"
-          terraform validate
+            echo "==> az account show"
+            az account show
 
-          echo "==> terraform plan"
-          terraform plan -out=tfplan
+            echo "==> Print repo root and files"
+            pwd
+            ls -la
 
-          echo "==> terraform apply"
-          terraform apply -auto-approve tfplan
+            echo "==> Checking TF workdir: $(TF_WORKDIR)"
+            ls -la "$(TF_WORKDIR)"
 
-# ========== Stage 2: Deploy App (اختياري الآن) ==========
-# بعد ما تتأكد أن Terraform يشتغل وتُنشأ الموارد، نضيف خطوات النشر.
-# مؤقتًا نخليها Placeholder.
+            cd "$(TF_WORKDIR)"
+
+            echo "==> Terraform version"
+            terraform version
+
+            echo "==> Create variables.auto.tfvars from pipeline variables"
+            cat > variables.auto.tfvars <<EOF
+            project_name        = "${PROJECT_NAME}"
+            location            = "${LOCATION}"
+            resource_group_name = "${RESOURCE_GROUP_NAME}"
+            webapp_name         = "${WEBAPP_NAME}"
+            EOF
+
+            echo "==> variables.auto.tfvars content:"
+            cat variables.auto.tfvars
+
+            echo "==> terraform init"
+            terraform init -upgrade -input=false -no-color
+
+            echo "==> terraform validate"
+            terraform validate -no-color
+
+            echo "==> terraform plan"
+            terraform plan -out=tfplan -input=false -no-color || { echo 'PLAN FAILED'; exit 1; }
+
+            echo "==> terraform show (plan)"
+            terraform show -no-color tfplan || true
+
+            echo "==> terraform apply"
+            terraform apply -auto-approve -input=false -no-color tfplan
+
+# ----------------------------------------------------
+# 2) Deploy (اختياري/Placeholder) — فعلّه لاحقاً بعد نجاح الـ TF
+# ----------------------------------------------------
 - stage: Deploy
   displayName: "Deploy (placeholder)"
   dependsOn: BuildAndTerraform
   condition: succeeded()
   jobs:
-  - job: Echo
+  - job: DeployPlaceholder
     steps:
-    - script: |
-        echo "Infra created ✅"
-        echo "نضيف هنا لاحقًا نشر FakeRestAPI إلى App Service"
-      displayName: "Placeholder"
+      - bash: echo "Deploy stage will go here after TF succeeds."
+        displayName: "Deploy placeholder"
