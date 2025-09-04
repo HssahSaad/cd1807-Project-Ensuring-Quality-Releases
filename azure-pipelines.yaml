@@ -1,121 +1,150 @@
-# =========================
 # azure-pipelines.yaml
-# =========================
+# Trigger: manual for now. غيّرها لاحقًا لو تبغى على فروع معيّنة.
+trigger: none
 
-trigger:
-  branches:
-    include:
-      - main
-
+# استخدم Microsoft-hosted agent
 pool:
   vmImage: ubuntu-latest
 
+# ========= Variables =========
 variables:
-  # اسم خدمة الاتصال (Service connection) في Project Settings > Service connections
-  AZURE_SERVICE_CONNECTION: "AzureServiceConnection"
+  System.Debug: 'true'
 
-  # مجلد ملفات Terraform داخل الريبو
-  TF_WORKDIR: "terraform/environments/dev"   # <-- بدل "terraform"
+  # اسم اتصال Azure DevOps Service Connection (OIDC)
+  azureServiceConnectionId: 'AzureServiceConnection'
 
-  # نسخة Terraform التي سنثبتها يدوياً
-  TF_VERSION: "1.6.6"
+  # Terraform
+  TF_VERSION: '1.8.5'
 
-  # متغيرات للبنية التحتية (عدّلها لتناسبك)
-  PROJECT_NAME: "qa-project"
-  LOCATION: "eastus"
-  RESOURCE_GROUP_NAME: "qa-rg"
-  WEBAPP_NAME: "qa-fakerestapi-$(Build.SourceVersion)"
+  # Backend (tfstate)
+  TF_BACKEND_RG: 'Azuredevops'
+  TF_BACKEND_SA: 'tfstate3193425499'
+  TF_BACKEND_CONTAINER: 'tfstate'
+  TF_BACKEND_KEY: 'test.terraform.tfstate'
+
+  # متغيّرات Terraform للموديلات (عدّلها حسب مشروعك)
+  TF_VAR_project_name:        'qa-project'
+  TF_VAR_location:            'westeurope'
+  TF_VAR_resource_group_name: 'eqr-dev-rg'
+  # اسم الويب آب بيتكوّن لاحقًا من الموديول، هنا مجرد مثال:
+  TF_VAR_webapp_name:         'qa-fakerestapi-$(Build.SourceVersion)'
 
 stages:
-# ----------------------------------------------------
-# 1) Build & Terraform
-# ----------------------------------------------------
-- stage: BuildAndTerraform
-  displayName: "Build & Terraform"
+- stage: Build
+  displayName: Build (Terraform + Artifacts)
   jobs:
-  - job: Terraform
-    displayName: "Terraform init/plan/apply"
+  - job: BuildInfrastructure
+    displayName: Build Infrastructure + Package Tests
     steps:
-      - checkout: self
-        clean: true
+    - checkout: self
+      persistCredentials: true
 
-      # أدوات أساسية
-      - bash: |
-          set -e
-          sudo apt-get update -y
-          sudo apt-get install -y curl unzip jq
-        displayName: "Install base tools"
+    # ===== Terraform (init/plan/apply) =====
+    - task: AzureCLI@2
+      displayName: Terraform init/plan/apply (AAD/OIDC)
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        addSpnToEnvironment: true
+        workingDirectory: '$(Build.SourcesDirectory)/terraform/environments/test'
+        inlineScript: |
+          set -eo pipefail
+          echo "==> az account show"
+          az account show
 
-      # تثبيت Terraform يدوياً (بدون أي Tasks من Marketplace)
-      - bash: |
-          set -euxo pipefail
-          echo "==> Installing Terraform $(TF_VERSION)"
-          curl -fsSL -o tf.zip "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
-          sudo unzip -o tf.zip -d /usr/local/bin
-          rm -f tf.zip
-          terraform version
-        displayName: "Install Terraform"
+          echo "==> Print repo root and files"
+          echo "$(Build.SourcesDirectory)"
+          ls -la "$(Build.SourcesDirectory)" || true
 
-      # خطوة تشخيصية كاملة عبر AzureCLI
-      - task: AzureCLI@2
-        displayName: "Terraform init/plan/apply (diagnostic)"
-        inputs:
-          azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -euo pipefail
+          echo "==> Check terraform working dir: $(pwd)"
+          ls -la || true
 
-            echo "==> az account show"
-            az account show
+          # 0) Ephemeral SSH key for this run (علشان vm module لو يطلب مفتاح)
+          mkdir -p "$HOME/.ssh"
+          ssh-keygen -t rsa -b 4096 -N "" -f "$HOME/.ssh/azdo_ephemeral" -q
+          export TF_VAR_admin_ssh_public_key="$(cat "$HOME/.ssh/azdo_ephemeral.pub")"
+          export TF_VAR_admin_username="azureuser"
 
-            echo "==> Print repo root and files"
-            pwd
-            ls -la
+          # ---- OIDC for Terraform (critical) ----
+          export ARM_USE_OIDC=true
+          export ARM_CLIENT_ID="$servicePrincipalId"
+          export ARM_TENANT_ID="$tenantId"
+          export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+          export ARM_OIDC_TOKEN="$idToken"
 
-            echo "==> Checking TF workdir: $(TF_WORKDIR)"
-            ls -la "$(TF_WORKDIR)"
+          # 1) Install the exact Terraform version
+          mkdir -p "$HOME/bin"
+          export PATH="$HOME/bin:$PATH"
+          TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
+          curl -sSL -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+          python3 -m zipfile -e "$TF_ZIP" /tmp
+          mv -f /tmp/terraform "$HOME/bin/terraform"
+          chmod +x "$HOME/bin/terraform"
+          terraform -version
 
-            cd "$(TF_WORKDIR)"
+          # 2) Ensure tfstate container exists
+          az storage container create \
+            --name "$(TF_BACKEND_CONTAINER)" \
+            --account-name "$(TF_BACKEND_SA)" \
+            --auth-mode login >/dev/null 2>&1 || true
 
-            echo "==> Terraform version"
-            terraform version
+          # 3) Terraform init using AAD (OIDC)
+          echo "=== Terraform INIT ==="
+          terraform init -input=false -no-color \
+            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
+            -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
+            -backend-config="container_name=$(TF_BACKEND_CONTAINER)" \
+            -backend-config="key=$(TF_BACKEND_KEY)" \
+            -backend-config="use_azuread_auth=true"
 
-            echo "==> Create variables.auto.tfvars from pipeline variables"
-            cat > variables.auto.tfvars <<EOF
-            project_name        = "${PROJECT_NAME}"
-            location            = "${LOCATION}"
-            resource_group_name = "${RESOURCE_GROUP_NAME}"
-            webapp_name         = "${WEBAPP_NAME}"
-            EOF
+          # 4) Validate + Plan + Apply
+          terraform validate -no-color
+          terraform plan -input=false -no-color -out=tfplan
+          terraform apply -input=false -no-color -auto-approve tfplan
 
-            echo "==> variables.auto.tfvars content:"
-            cat variables.auto.tfvars
+    # ===== Verify test folders exist =====
+    - script: |
+        echo "==> Verify test folders exist"
+        ls -la automatedtesting || true
+        ls -la automatedtesting/selenium || true
+        ls -la automatedtesting/jmeter || true
+        ls -la automatedtesting/jmeter/fakerestapi || true
+        ls -la automatedtesting/jmeter/test-suite || true
+      displayName: Verify test folders
 
-            echo "==> terraform init"
-            terraform init -upgrade -input=false -no-color
+    # ===== Archive test packages =====
+    - task: ArchiveFiles@2
+      displayName: Archive selenium/
+      inputs:
+        rootFolderOrFile: '$(Build.SourcesDirectory)/automatedtesting/selenium'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/selenium.zip'
+        replaceExistingArchive: true
 
-            echo "==> terraform validate"
-            terraform validate -no-color
+    - task: ArchiveFiles@2
+      displayName: Archive jmeter/fakerestapi/
+      inputs:
+        rootFolderOrFile: '$(Build.SourcesDirectory)/automatedtesting/jmeter/fakerestapi'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/fakerestapi.zip'
+        replaceExistingArchive: true
 
-            echo "==> terraform plan"
-            terraform plan -out=tfplan -input=false -no-color || { echo 'PLAN FAILED'; exit 1; }
+    - task: ArchiveFiles@2
+      displayName: Archive jmeter/test-suite/
+      inputs:
+        rootFolderOrFile: '$(Build.SourcesDirectory)/automatedtesting/jmeter/test-suite'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/jmeter-tests.zip'
+        replaceExistingArchive: true
 
-            echo "==> terraform show (plan)"
-            terraform show -no-color tfplan || true
-
-            echo "==> terraform apply"
-            terraform apply -auto-approve -input=false -no-color tfplan
-
-# ----------------------------------------------------
-# 2) Deploy (اختياري/Placeholder) — فعلّه لاحقاً بعد نجاح الـ TF
-# ----------------------------------------------------
-- stage: Deploy
-  displayName: "Deploy (placeholder)"
-  dependsOn: BuildAndTerraform
-  condition: succeeded()
-  jobs:
-  - job: DeployPlaceholder
-    steps:
-      - bash: echo "Deploy stage will go here after TF succeeds."
-        displayName: "Deploy placeholder"
+    # ===== Publish artifacts =====
+    - task: PublishPipelineArtifact@1
+      displayName: Publish artifacts (selenium, fakerestapi, jmeter-tests)
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)'
+        artifact: 'drop'
+        publishLocation: 'pipeline'
