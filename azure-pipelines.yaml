@@ -1,136 +1,93 @@
 # azure-pipelines.yml
 trigger: none
 
-pool:
-  name: myAgentPool
-
-# ----- Pipeline-wide variables -----
 variables:
   System.Debug: 'true'
-  azureServiceConnectionId: 'AzureServiceConnection'
-  TF_VERSION: '1.8.5'
-
-  TF_BACKEND_RG: 'Azuredevops'
-  TF_BACKEND_SA: 'tfstate3193425499'
-  TF_BACKEND_CONTAINER: 'tfstate'
-  TF_BACKEND_KEY: 'test.terraform.tfstate'
+  FAKE_RESTAPI_PATH: '$(Build.SourcesDirectory)/FakeRestAPI'  
+  PACKAGE_NAME: 'FakeRestAPI.zip'
 
 stages:
+# =========================
+# 1) BUILD:
+# =========================
 - stage: Build
-  displayName: Build
+  displayName: Build (Archive FakeRestAPI)
   jobs:
-  - job: BuildInfrastructure
-    displayName: Build Infrastructure
-    # Allow enough time even if Azure is slow
-    timeoutInMinutes: 120
-
+  - job: Package_FakeRestAPI
+    displayName: Package FakeRestAPI
+    pool:
+      vmImage: 'ubuntu-latest'  
+    timeoutInMinutes: 30
     steps:
     - checkout: self
-      clean: true   # ensure no old tfplan remains in the workspace
 
-    - task: AzureCLI@2
-      displayName: Terraform INIT/VALIDATE/PLAN
+    - bash: |
+        set -euxo pipefail
+        test -d "$(FAKE_RESTAPI_PATH)" || { echo "Folder not found: $(FAKE_RESTAPI_PATH)"; exit 1; }
+        echo "Found: $(FAKE_RESTAPI_PATH)"
+      displayName: "Verify FakeRestAPI folder exists"
+
+    - task: ArchiveFiles@2
+      displayName: "Archive FakeRestAPI -> $(PACKAGE_NAME)"
       inputs:
-        azureSubscription: '$(azureServiceConnectionId)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        addSpnToEnvironment: true
-        workingDirectory: '$(Build.SourcesDirectory)/terraform/environments/test'
-        inlineScript: |
-          set -euo pipefail
-          set -x
+        rootFolderOrFile: '$(FAKE_RESTAPI_PATH)'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(PACKAGE_NAME)'
+        replaceExistingArchive: true
 
-          echo "=== DEBUG ==="
-          echo "PWD=$(pwd)"
-          ls -la
-
-          # ---- AAD/OIDC auth for Terraform provider & backend ----
-          export ARM_USE_OIDC=true
-          export ARM_CLIENT_ID="$servicePrincipalId"
-          export ARM_TENANT_ID="$tenantId"
-          export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
-          export ARM_OIDC_TOKEN="$idToken"
-
-          # ---- Make Terraform fully non-interactive ----
-          export TF_INPUT=false
-
-          # ---- Create an ephemeral SSH key for the VM login ----
-          mkdir -p "$HOME/.ssh"
-          ssh-keygen -t rsa -b 4096 -N "" -f "$HOME/.ssh/azdo_ephemeral" -q
-          export TF_VAR_admin_ssh_public_key="$(cat "$HOME/.ssh/azdo_ephemeral.pub")"
-          export TF_VAR_admin_username="azureuser"
-
-          # ---- Install exact Terraform version for reproducibility ----
-          mkdir -p "$HOME/bin"
-          export PATH="$HOME/bin:$PATH"
-          TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
-          curl -sSL -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
-          python3 -m zipfile -e "$TF_ZIP" /tmp
-          mv -f /tmp/terraform "$HOME/bin/terraform"
-          chmod +x "$HOME/bin/terraform"
-          terraform -version
-
-          # Confirm Azure login context
-          az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
-
-          # Ensure state container exists (needs blob data permissions on the SA)
-          az storage container create \
-            --name "$(TF_BACKEND_CONTAINER)" \
-            --account-name "$(TF_BACKEND_SA)" \
-            --auth-mode login >/dev/null 2>&1 || true
-
-          echo "=== Terraform INIT ==="
-          terraform init -input=false -no-color \
-            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
-            -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
-            -backend-config="container_name=$(TF_BACKEND_CONTAINER)" \
-            -backend-config="key=$(TF_BACKEND_KEY)" \
-            -backend-config="use_azuread_auth=true"
-
-          terraform validate -no-color
-
-          # ---- Use a unique plan filename to avoid the overwrite prompt ----
-          PLAN_FILE="tfplan-$(Build.BuildId).bin"
-          terraform plan -input=false -no-color -out="$PLAN_FILE"
-
-          # Persist the plan path for the next step
-          echo "##vso[task.setvariable variable=PLAN_FILE;isOutput=true]$PLAN_FILE"
-      name: planStep
-
-    - task: AzureCLI@2
-      displayName: Terraform APPLY
+    - task: PublishBuildArtifacts@1
+      displayName: "Publish artifact (drop)"
       inputs:
-        azureSubscription: '$(azureServiceConnectionId)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        addSpnToEnvironment: true
-        workingDirectory: '$(Build.SourcesDirectory)/terraform/environments/test'
-        inlineScript: |
-          set -euo pipefail
-          set -x
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
 
-          # Same OIDC env for provider/backend
-          export ARM_USE_OIDC=true
-          export ARM_CLIENT_ID="$servicePrincipalId"
-          export ARM_TENANT_ID="$tenantId"
-          export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
-          export ARM_OIDC_TOKEN="$idToken"
+# =========================
+# 2) DEPLOY
+# =========================
+- stage: Deploy
+  displayName: Deploy to Test VM (Environment)
+  dependsOn: Build
+  jobs:
+  - deployment: CopyAndUnzipOnVM
+    displayName: "Copy package to VM and unzip"
+    environment: "linux-test-vm"   
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: drop
+            displayName: "Download artifact (drop)"
 
-          export TF_INPUT=false
+          - bash: |
+              set -euxo pipefail
+              if ! command -v unzip >/dev/null 2>&1; then
+                sudo apt-get update -y
+                sudo apt-get install -y unzip
+              fi
+            displayName: "Ensure unzip is installed"
 
-          # Re-install terraform (same method as above) so this step is self-contained
-          mkdir -p "$HOME/bin"
-          export PATH="$HOME/bin:$PATH"
-          TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
-          curl -sSL -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
-          python3 -m zipfile -e "$TF_ZIP" /tmp
-          mv -f /tmp/terraform "$HOME/bin/terraform"
-          chmod +x "$HOME/bin/terraform"
+          - bash: |
+              set -euxo pipefail
+              PKG_SRC="$(Pipeline.Workspace)/drop/$(PACKAGE_NAME)"
+              DEST_ROOT="/home/azureuser/site"
+              DEST_PKG="$DEST_ROOT/packages"
+              DEST_APP="$DEST_ROOT/FakeRestAPI"
 
-          PLAN_FILE="$(PLAN_FILE)"   # value set by previous step
+              mkdir -p "$DEST_PKG" "$DEST_APP"
 
-          # Apply without prompts using the pre-created plan file
-          terraform apply -input=false -no-color -auto-approve "$PLAN_FILE"
+              cp -f "$PKG_SRC" "$DEST_PKG/$(PACKAGE_NAME)"
+              ls -la "$DEST_PKG"
 
-          # Optional: clean up plan file so re-runs start fresh
-          rm -f "$PLAN_FILE" || true
+              unzip -o "$DEST_PKG/$(PACKAGE_NAME)" -d "$DEST_APP"
+              ls -la "$DEST_APP"
+            displayName: "Copy & unzip package on VM"
+
+          # - bash: |
+          #     set -euxo pipefail
+          #     cd /home/azureuser/site/FakeRestAPI
+          #     nohup python3 -m http.server 8080 >/home/azureuser/site/http.log 2>&1 &
+          #     echo "Started simple server on :8080"
+          #   displayName: "OPTIONAL: start simple test server"
