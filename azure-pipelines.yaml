@@ -1,62 +1,49 @@
 trigger:
 - main
 
-pool:
-  vmImage: 'ubuntu-latest'
-
 variables:
-  buildConfiguration: 'Release'
+  python.version: '3.7.6'
+  terraform.version: '0.13.4'
+  vmImageName: 'ubuntu-latest'
 
 stages:
 - stage: BuildAndTest
-  displayName: 'Build and Test'
+  displayName: Build and Test
   jobs:
   - job: Terraform
-    displayName: 'Run Terraform'
+    displayName: Run Terraform
+    pool:
+      vmImage: $(vmImageName)
     steps:
     - task: TerraformInstaller@0
-      displayName: 'Install Terraform'
       inputs:
-        terraformVersion: '1.2.9'
+        terraformVersion: $(terraform.version)
 
     - task: TerraformTaskV1@0
-      displayName: 'Terraform Init'
+      displayName: Terraform Init
       inputs:
         provider: 'azurerm'
         command: 'init'
-        workingDirectory: 'terraform'
-        backendServiceArm: 'AzureServiceConnection'
-        backendAzureRmResourceGroupName: 'RG-QA'
-        backendAzureRmStorageAccountName: 'storageqa123'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+        backendServiceArm: 'EnsuringQualityReleasesSC'
+        backendAzureRmResourceGroupName: 'QA_Project_RG'
+        backendAzureRmStorageAccountName: 'qaprojectstorage'
         backendAzureRmContainerName: 'tfstate'
         backendAzureRmKey: 'terraform.tfstate'
 
     - task: TerraformTaskV1@0
-      displayName: 'Terraform Apply'
+      displayName: Terraform Apply
       inputs:
         provider: 'azurerm'
         command: 'apply'
-        workingDirectory: 'terraform'
-        environmentServiceNameAzureRM: 'AzureServiceConnection'
-        args: '-auto-approve'
-
-  - job: Postman
-    displayName: 'Run Postman Tests'
-    dependsOn: Terraform
-    steps:
-    - task: NodeTool@0
-      inputs:
-        versionSpec: '16.x'
-      displayName: 'Install Node.js'
-
-    - script: |
-        npm install -g newman
-        newman run automatedtesting/postman/RegressionTestSuite.json
-        newman run automatedtesting/postman/DataValidationTestSuite.json
-      displayName: 'Run Postman Collections'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+        environmentServiceNameAzureRM: 'EnsuringQualityReleasesSC'
+        vars: |
+          app_service_name = "FakeRestAPIApp"
+          resource_group_name = "QA_Project_RG"
 
 - stage: Deploy
-  displayName: 'Deploy FakeRestAPI'
+  displayName: Deploy FakeRestAPI
   dependsOn: BuildAndTest
   jobs:
   - deployment: DeployWebApp
@@ -67,9 +54,9 @@ stages:
           steps:
           - task: AzureWebApp@1
             inputs:
-              azureSubscription: 'AzureServiceConnection'
-              appName: '$(APP_SERVICE_NAME)'
+              azureSubscription: 'EnsuringQualityReleasesSC'
+              appName: 'FakeRestAPIApp'
               package: '**/*.zip'
               runtimeStack: 'NODE|16-lts'
-              appSettings: >
-                -WEBSITE_RUN_FROM_PACKAGE 0
+              appSettings: |
+                WEBSITE_RUN_FROM_PACKAGE=0
