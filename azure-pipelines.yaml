@@ -1,103 +1,81 @@
-# azure-pipelines.yaml  (بدون أي Extensions خارجية)
-
 trigger:
   branches:
     include:
       - main
 
 pool:
-  vmImage: 'ubuntu-latest'
+  vmImage: ubuntu-latest
 
 variables:
-  # اسم Service Connection كما هو عندك
-  AZURE_SERVICE_CONNECTION: 'AzureServiceConnection'
-  # مجلد عمل Terraform داخل المستودع (عدّليه إذا تبين)
-  tfWorkingDirectory: 'terraform'
+  AZURE_SERVICE_CONNECTION: "AzureServiceConnection"
+  tfWorkingDirectory: "terraform"
+  TF_VERSION: "1.6.6"
 
 stages:
-
-# =========================
-# 1) Build & Test (Terraform)
-# =========================
 - stage: BuildAndTest
-  displayName: Build and Test
+  displayName: "Build and Test"
   jobs:
   - job: RunTerraform
-    displayName: Run Terraform
+    displayName: "Run Terraform"
     steps:
-      - checkout: self
+    - checkout: self
+      persistCredentials: true
 
-      # تثبيت terraform (أداة مستقلة، ما تحتاج Extension إضافي)
-      - task: TerraformInstaller@1
-        displayName: 'Install Terraform'
-        inputs:
-          terraformVersion: '1.5.7'
+    - task: TerraformInstaller@1
+      displayName: "Install Terraform"
+      inputs:
+        terraformVersion: "$(TF_VERSION)"
 
-      # لو ما فيه ملفات .tf ننشئ main.tf بسيط حتى تختفي "No configuration files"
-      - bash: |
-          set -e
-          echo "Checking Terraform working directory: $(tfWorkingDirectory)"
-          if [ ! -d "$(tfWorkingDirectory)" ]; then
-            mkdir -p "$(tfWorkingDirectory)"
-          fi
-          count_tf=$(ls -1 "$(tfWorkingDirectory)"/*.tf 2>/dev/null | wc -l || true)
-          if [ "$count_tf" -eq 0 ]; then
-            cat > "$(tfWorkingDirectory)/main.tf" << 'EOF'
-            terraform {
-              required_providers {
-                azurerm = {
-                  source  = "hashicorp/azurerm"
-                  version = "~> 3.0"
-                }
-              }
-              backend "local" {}
-            }
+    - bash: |
+        set -euo pipefail
+        echo "TF dir: $(tfWorkingDirectory)"
+        mkdir -p "$(tfWorkingDirectory)"
+        if ! ls "$(tfWorkingDirectory)"/*.tf >/dev/null 2>&1; then
+          cat >"$(tfWorkingDirectory)/main.tf" <<'EOF'
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+  }
+}
 
-            provider "azurerm" {
-              features {}
-            }
-            EOF
-          fi
-          echo "TF files ready."
-        displayName: 'Ensure Terraform config exists'
+provider "azurerm" {
+  features {}
+}
+EOF
+        fi
+        echo "TF files ready."
+      displayName: "Ensure Terraform config exists"
 
-      # نشغّل أوامر terraform عبر AzureCLI@2 باستخدام الـ Service Connection
-      - task: AzureCLI@2
-        displayName: 'Terraform Init/Plan/Apply via Azure CLI'
-        inputs:
-          azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
-          scriptType: bash
-          scriptLocation: inlineScript
-          addSpnToEnvironment: true
-          useGlobalConfig: true
-          workingDirectory: '$(tfWorkingDirectory)'
-          inlineScript: |
-            set -e
-            echo "Azure login done via service connection."
-            terraform -version
-            terraform init
-            terraform plan -out=tfplan
-            terraform apply -auto-approve tfplan
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Init"
+      inputs:
+        provider: azurerm
+        command: init
+        workingDirectory: "$(tfWorkingDirectory)"
 
-# ==========================================
-# 2) Deploy (اختياري) إلى Azure App Service
-# ==========================================
-- stage: Deploy
-  displayName: Deploy FakeRestAPI
-  dependsOn: BuildAndTest
-  condition: succeeded()
-  jobs:
-  - deployment: DeployWebApp
-    displayName: 'Deploy to App Service'
-    environment: 'dev'
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-            - task: AzureWebApp@1
-              displayName: 'Azure WebApp Deploy'
-              inputs:
-                azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
-                appName: '$(APP_SERVICE_NAME)'   # ضعي اسم الـ App Service لاحقاً من Variables
-                package: '**/*.zip'              # سيبحث عن أي zip artifact (إن وجد)
-                runtimeStack: 'NODE|16-lts'
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Validate"
+      inputs:
+        provider: azurerm
+        command: validate
+        workingDirectory: "$(tfWorkingDirectory)"
+
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Plan"
+      inputs:
+        provider: azurerm
+        command: plan
+        workingDirectory: "$(tfWorkingDirectory)"
+        environmentServiceNameAzureRM: "$(AZURE_SERVICE_CONNECTION)"
+
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Apply"
+      inputs:
+        provider: azurerm
+        command: apply
+        commandOptions: "-auto-approve"
+        workingDirectory: "$(tfWorkingDirectory)"
+        environmentServiceNameAzureRM: "$(AZURE_SERVICE_CONNECTION)"
