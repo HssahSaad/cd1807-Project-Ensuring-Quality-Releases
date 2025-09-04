@@ -1,93 +1,56 @@
-# azure-pipelines.yml
-trigger: none
+trigger:
+- main
 
-variables:
-  System.Debug: 'true'
-  FAKE_RESTAPI_PATH: '$(Build.SourcesDirectory)/FakeRestAPI'  
-  PACKAGE_NAME: 'FakeRestAPI.zip'
+pool: 
+  vmImage: 'ubuntu-latest'
 
 stages:
-# =========================
-# 1) BUILD:
-# =========================
 - stage: Build
-  displayName: Build (Archive FakeRestAPI)
+  displayName: "Build Stage"
   jobs:
-  - job: Package_FakeRestAPI
-    displayName: Package FakeRestAPI
-    pool:
-      vmImage: 'ubuntu-latest'  
-    timeoutInMinutes: 30
+  - job: Archive
+    displayName: "Archive FakeRestAPI"
     steps:
-    - checkout: self
-
-    - bash: |
-        set -euxo pipefail
-        test -d "$(FAKE_RESTAPI_PATH)" || { echo "Folder not found: $(FAKE_RESTAPI_PATH)"; exit 1; }
-        echo "Found: $(FAKE_RESTAPI_PATH)"
-      displayName: "Verify FakeRestAPI folder exists"
+    - script: |
+        echo "Cleaning up any old FakeRestAPI folder..."
+        rm -rf FakeRestAPI
+        echo "Creating FakeRestAPI folder..."
+        mkdir FakeRestAPI
+        echo "Adding a test file to FakeRestAPI..."
+        echo "Hello from FakeRestAPI" > FakeRestAPI/index.html
+      displayName: "Prepare FakeRestAPI Folder"
 
     - task: ArchiveFiles@2
-      displayName: "Archive FakeRestAPI -> $(PACKAGE_NAME)"
       inputs:
-        rootFolderOrFile: '$(FAKE_RESTAPI_PATH)'
-        includeRootFolder: false
+        rootFolderOrFile: 'FakeRestAPI'
+        includeRootFolder: true
         archiveType: 'zip'
-        archiveFile: '$(Build.ArtifactStagingDirectory)/$(PACKAGE_NAME)'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/FakeRestAPI.zip'
         replaceExistingArchive: true
+      displayName: "Archive FakeRestAPI"
 
-    - task: PublishBuildArtifacts@1
-      displayName: "Publish artifact (drop)"
-      inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-        ArtifactName: 'drop'
-        publishLocation: 'Container'
+    - publish: '$(Build.ArtifactStagingDirectory)/FakeRestAPI.zip'
+      artifact: drop
+      displayName: "Publish FakeRestAPI artifact"
 
-# =========================
-# 2) DEPLOY
-# =========================
 - stage: Deploy
-  displayName: Deploy to Test VM (Environment)
-  dependsOn: Build
+  displayName: "Deploy Stage"
   jobs:
-  - deployment: CopyAndUnzipOnVM
-    displayName: "Copy package to VM and unzip"
-    environment: "linux-test-vm"   
+  - deployment: DeployWeb
+    displayName: "Deploy to Linux VM"
+    environment: 
+      name: "linux-test-vm"
+      resourceType: VirtualMachine
     strategy:
       runOnce:
         deploy:
           steps:
-          - download: current
-            artifact: drop
-            displayName: "Download artifact (drop)"
-
-          - bash: |
-              set -euxo pipefail
-              if ! command -v unzip >/dev/null 2>&1; then
-                sudo apt-get update -y
-                sudo apt-get install -y unzip
-              fi
-            displayName: "Ensure unzip is installed"
-
-          - bash: |
-              set -euxo pipefail
-              PKG_SRC="$(Pipeline.Workspace)/drop/$(PACKAGE_NAME)"
-              DEST_ROOT="/home/azureuser/site"
-              DEST_PKG="$DEST_ROOT/packages"
-              DEST_APP="$DEST_ROOT/FakeRestAPI"
-
-              mkdir -p "$DEST_PKG" "$DEST_APP"
-
-              cp -f "$PKG_SRC" "$DEST_PKG/$(PACKAGE_NAME)"
-              ls -la "$DEST_PKG"
-
-              unzip -o "$DEST_PKG/$(PACKAGE_NAME)" -d "$DEST_APP"
-              ls -la "$DEST_APP"
-            displayName: "Copy & unzip package on VM"
-
-          # - bash: |
-          #     set -euxo pipefail
-          #     cd /home/azureuser/site/FakeRestAPI
-          #     nohup python3 -m http.server 8080 >/home/azureuser/site/http.log 2>&1 &
-          #     echo "Started simple server on :8080"
-          #   displayName: "OPTIONAL: start simple test server"
+          - script: |
+              echo "Deploying FakeRestAPI to /var/www/html..."
+              sudo apt-get update -y
+              sudo apt-get install unzip -y
+              unzip $(Pipeline.Workspace)/drop/FakeRestAPI.zip -d /tmp/FakeRestAPI
+              sudo mkdir -p /var/www/html
+              sudo cp -r /tmp/FakeRestAPI/* /var/www/html/
+              echo "Deployment complete!"
+            displayName: "Deploy FakeRestAPI to VM"
