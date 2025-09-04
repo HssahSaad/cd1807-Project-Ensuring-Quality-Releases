@@ -1,56 +1,75 @@
 trigger:
 - main
 
-pool: 
+pool:
   vmImage: 'ubuntu-latest'
 
+variables:
+  buildConfiguration: 'Release'
+
 stages:
-- stage: Build
-  displayName: "Build Stage"
+- stage: BuildAndTest
+  displayName: 'Build and Test'
   jobs:
-  - job: Archive
-    displayName: "Archive FakeRestAPI"
+  - job: Terraform
+    displayName: 'Run Terraform'
     steps:
-    - script: |
-        echo "Cleaning up any old FakeRestAPI folder..."
-        rm -rf FakeRestAPI
-        echo "Creating FakeRestAPI folder..."
-        mkdir FakeRestAPI
-        echo "Adding a test file to FakeRestAPI..."
-        echo "Hello from FakeRestAPI" > FakeRestAPI/index.html
-      displayName: "Prepare FakeRestAPI Folder"
-
-    - task: ArchiveFiles@2
+    - task: TerraformInstaller@0
+      displayName: 'Install Terraform'
       inputs:
-        rootFolderOrFile: 'FakeRestAPI'
-        includeRootFolder: true
-        archiveType: 'zip'
-        archiveFile: '$(Build.ArtifactStagingDirectory)/FakeRestAPI.zip'
-        replaceExistingArchive: true
-      displayName: "Archive FakeRestAPI"
+        terraformVersion: '1.2.9'
 
-    - publish: '$(Build.ArtifactStagingDirectory)/FakeRestAPI.zip'
-      artifact: drop
-      displayName: "Publish FakeRestAPI artifact"
+    - task: TerraformTaskV1@0
+      displayName: 'Terraform Init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: 'terraform'
+        backendServiceArm: 'AzureServiceConnection'
+        backendAzureRmResourceGroupName: 'RG-QA'
+        backendAzureRmStorageAccountName: 'storageqa123'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'terraform.tfstate'
+
+    - task: TerraformTaskV1@0
+      displayName: 'Terraform Apply'
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: 'terraform'
+        environmentServiceNameAzureRM: 'AzureServiceConnection'
+        args: '-auto-approve'
+
+  - job: Postman
+    displayName: 'Run Postman Tests'
+    dependsOn: Terraform
+    steps:
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '16.x'
+      displayName: 'Install Node.js'
+
+    - script: |
+        npm install -g newman
+        newman run automatedtesting/postman/RegressionTestSuite.json
+        newman run automatedtesting/postman/DataValidationTestSuite.json
+      displayName: 'Run Postman Collections'
 
 - stage: Deploy
-  displayName: "Deploy Stage"
+  displayName: 'Deploy FakeRestAPI'
+  dependsOn: BuildAndTest
   jobs:
-  - deployment: DeployWeb
-    displayName: "Deploy to Linux VM"
-    environment: 
-      name: "linux-test-vm"
-      resourceType: VirtualMachine
+  - deployment: DeployWebApp
+    environment: 'dev'
     strategy:
       runOnce:
         deploy:
           steps:
-          - script: |
-              echo "Deploying FakeRestAPI to /var/www/html..."
-              sudo apt-get update -y
-              sudo apt-get install unzip -y
-              unzip $(Pipeline.Workspace)/drop/FakeRestAPI.zip -d /tmp/FakeRestAPI
-              sudo mkdir -p /var/www/html
-              sudo cp -r /tmp/FakeRestAPI/* /var/www/html/
-              echo "Deployment complete!"
-            displayName: "Deploy FakeRestAPI to VM"
+          - task: AzureWebApp@1
+            inputs:
+              azureSubscription: 'AzureServiceConnection'
+              appName: '$(APP_SERVICE_NAME)'
+              package: '**/*.zip'
+              runtimeStack: 'NODE|16-lts'
+              appSettings: >
+                -WEBSITE_RUN_FROM_PACKAGE 0
