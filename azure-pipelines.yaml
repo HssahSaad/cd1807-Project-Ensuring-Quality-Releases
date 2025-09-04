@@ -4,6 +4,7 @@ trigger: none
 pool:
   name: myAgentPool
 
+# ----- Pipeline-wide variables -----
 variables:
   System.Debug: 'true'
   azureServiceConnectionId: 'AzureServiceConnection'
@@ -20,16 +21,15 @@ stages:
   jobs:
   - job: BuildInfrastructure
     displayName: Build Infrastructure
+    # Allow enough time even if Azure is slow
     timeoutInMinutes: 120
+
     steps:
     - checkout: self
+      clean: true   # ensure no old tfplan remains in the workspace
 
-    # ==============================
-    # Terraform INIT + VALIDATE + PLAN
-    # ==============================
     - task: AzureCLI@2
       displayName: Terraform INIT/VALIDATE/PLAN
-      timeoutInMinutes: 120
       inputs:
         azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
@@ -37,29 +37,30 @@ stages:
         addSpnToEnvironment: true
         workingDirectory: '$(Build.SourcesDirectory)/terraform/environments/test'
         inlineScript: |
-          set -eo pipefail
+          set -euo pipefail
           set -x
 
-          # keepalive loop so DevOps doesn't cancel on silence
-          while true; do echo "Still running Terraform INIT/PLAN... $(date)"; sleep 300; done &
+          echo "=== DEBUG ==="
+          echo "PWD=$(pwd)"
+          ls -la
 
-          echo "=== DEBUG: Starting Terraform PLAN ==="
-
-          # ---- OIDC authentication
+          # ---- AAD/OIDC auth for Terraform provider & backend ----
           export ARM_USE_OIDC=true
           export ARM_CLIENT_ID="$servicePrincipalId"
           export ARM_TENANT_ID="$tenantId"
           export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
           export ARM_OIDC_TOKEN="$idToken"
 
-          # ---- Ephemeral SSH key
+          # ---- Make Terraform fully non-interactive ----
+          export TF_INPUT=false
+
+          # ---- Create an ephemeral SSH key for the VM login ----
           mkdir -p "$HOME/.ssh"
           ssh-keygen -t rsa -b 4096 -N "" -f "$HOME/.ssh/azdo_ephemeral" -q
-          ADMIN_PUB_KEY="$(cat "$HOME/.ssh/azdo_ephemeral.pub")"
-          export TF_VAR_admin_ssh_public_key="$ADMIN_PUB_KEY"
+          export TF_VAR_admin_ssh_public_key="$(cat "$HOME/.ssh/azdo_ephemeral.pub")"
           export TF_VAR_admin_username="azureuser"
 
-          # ---- Install Terraform
+          # ---- Install exact Terraform version for reproducibility ----
           mkdir -p "$HOME/bin"
           export PATH="$HOME/bin:$PATH"
           TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
@@ -67,9 +68,18 @@ stages:
           python3 -m zipfile -e "$TF_ZIP" /tmp
           mv -f /tmp/terraform "$HOME/bin/terraform"
           chmod +x "$HOME/bin/terraform"
-          terraform --version
+          terraform -version
 
-          # ---- Terraform init
+          # Confirm Azure login context
+          az account show --query '{sub:id, tenant:tenantId, user:user}' -o table
+
+          # Ensure state container exists (needs blob data permissions on the SA)
+          az storage container create \
+            --name "$(TF_BACKEND_CONTAINER)" \
+            --account-name "$(TF_BACKEND_SA)" \
+            --auth-mode login >/dev/null 2>&1 || true
+
+          echo "=== Terraform INIT ==="
           terraform init -input=false -no-color \
             -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
             -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
@@ -77,16 +87,18 @@ stages:
             -backend-config="key=$(TF_BACKEND_KEY)" \
             -backend-config="use_azuread_auth=true"
 
-          # ---- Terraform validate & plan
           terraform validate -no-color
-          terraform plan -input=false -no-color -out=tfplan
 
-    # ==============================
-    # Terraform APPLY
-    # ==============================
+          # ---- Use a unique plan filename to avoid the overwrite prompt ----
+          PLAN_FILE="tfplan-$(Build.BuildId).bin"
+          terraform plan -input=false -no-color -out="$PLAN_FILE"
+
+          # Persist the plan path for the next step
+          echo "##vso[task.setvariable variable=PLAN_FILE;isOutput=true]$PLAN_FILE"
+      name: planStep
+
     - task: AzureCLI@2
       displayName: Terraform APPLY
-      timeoutInMinutes: 120
       inputs:
         azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
@@ -94,18 +106,31 @@ stages:
         addSpnToEnvironment: true
         workingDirectory: '$(Build.SourcesDirectory)/terraform/environments/test'
         inlineScript: |
-          set -eo pipefail
+          set -euo pipefail
           set -x
 
-          while true; do echo "Still running Terraform APPLY... $(date)"; sleep 300; done &
-
+          # Same OIDC env for provider/backend
           export ARM_USE_OIDC=true
           export ARM_CLIENT_ID="$servicePrincipalId"
           export ARM_TENANT_ID="$tenantId"
           export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
           export ARM_OIDC_TOKEN="$idToken"
 
-          export TF_VAR_admin_username="azureuser"
+          export TF_INPUT=false
 
-          # Apply from saved plan
-          terraform apply -input=false -no-color -auto-approve tfplan
+          # Re-install terraform (same method as above) so this step is self-contained
+          mkdir -p "$HOME/bin"
+          export PATH="$HOME/bin:$PATH"
+          TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
+          curl -sSL -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+          python3 -m zipfile -e "$TF_ZIP" /tmp
+          mv -f /tmp/terraform "$HOME/bin/terraform"
+          chmod +x "$HOME/bin/terraform"
+
+          PLAN_FILE="$(PLAN_FILE)"   # value set by previous step
+
+          # Apply without prompts using the pre-created plan file
+          terraform apply -input=false -no-color -auto-approve "$PLAN_FILE"
+
+          # Optional: clean up plan file so re-runs start fresh
+          rm -f "$PLAN_FILE" || true
