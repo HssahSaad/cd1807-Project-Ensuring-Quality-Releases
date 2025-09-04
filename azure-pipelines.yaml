@@ -6,8 +6,77 @@ trigger:
 pool:
   vmImage: ubuntu-latest
 
-steps:
-- script: |
-    echo "YAML sanity check ✅"
-    ls -la
-  displayName: Sanity check
+variables:
+  # اسم خدمة الاتصال اللي عندك (شفت إن اسمها AzureServiceConnection)
+  AZURE_SERVICE_CONNECTION: "AzureServiceConnection"
+
+  # مجلد Terraform داخل الريبو
+  TF_WORKDIR: "terraform"
+
+  # قيَم مواردك (تقدر تغيّرها)
+  PROJECT_NAME: "qa-demo"
+  LOCATION: "eastus"
+  RESOURCE_GROUP_NAME: "qa-demo-rg"
+  WEBAPP_NAME: "qa-demo-webapp-${{ variables['Build.SourceBranchName'] }}"
+
+stages:
+# ========== Stage 1: Build & Terraform ==========
+- stage: BuildAndTerraform
+  displayName: "Build & Terraform"
+  jobs:
+  - job: Terraform
+    displayName: "Terraform Plan & Apply"
+    steps:
+    - checkout: self
+
+    # تثبيت Terraform
+    - task: TerraformInstaller@1
+      displayName: "Install Terraform 1.6.6"
+      inputs:
+        terraformVersion: "1.6.6"
+
+    # تشغيل أوامر Terraform داخل سياق Azure CLI (يضمن المصادقة عبر Service Connection)
+    - task: AzureCLI@2
+      displayName: "Terraform init/plan/apply"
+      inputs:
+        azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          cd "$(TF_WORKDIR)"
+
+          # إنشاء/تحديث ملف variables.auto.tfvars من متغيرات البايبلاين
+          cat > variables.auto.tfvars <<EOF
+          project_name        = "${PROJECT_NAME}"
+          location            = "${LOCATION}"
+          resource_group_name = "${RESOURCE_GROUP_NAME}"
+          webapp_name         = "${WEBAPP_NAME}"
+          EOF
+
+          echo "==> terraform init"
+          terraform init -upgrade
+
+          echo "==> terraform validate"
+          terraform validate
+
+          echo "==> terraform plan"
+          terraform plan -out=tfplan
+
+          echo "==> terraform apply"
+          terraform apply -auto-approve tfplan
+
+# ========== Stage 2: Deploy App (اختياري الآن) ==========
+# بعد ما تتأكد أن Terraform يشتغل وتُنشأ الموارد، نضيف خطوات النشر.
+# مؤقتًا نخليها Placeholder.
+- stage: Deploy
+  displayName: "Deploy (placeholder)"
+  dependsOn: BuildAndTerraform
+  condition: succeeded()
+  jobs:
+  - job: Echo
+    steps:
+    - script: |
+        echo "Infra created ✅"
+        echo "نضيف هنا لاحقًا نشر FakeRestAPI إلى App Service"
+      displayName: "Placeholder"
