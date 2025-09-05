@@ -1,138 +1,135 @@
+# ===== Trigger =====
 trigger:
-  branches:
-    include:
-      - main   # شغّل البايبلاين على أي دفع (commit) لفرع main
+- main
 
-# شغّل على الـ self-hosted agent اللي عندك
+# ===== Self-hosted agent on your VM =====
 pool:
-  name: myAgentPool       # غيّرها إذا كان اسم الـ pool مختلف عندك
+  name: Default   # غيّرها إذا كان اسم الـPool عندك مختلف
 
-# المتغيّرات
+# ===== Variables =====
 variables:
-- group: eqr-secrets         # يحتوي CLIENT_ID / CLIENT_SECRET / TENANT_ID / SUBSCRIPTION_ID
+  - group: eqr-secrets          # اسم مجموعة المتغيّرات (تحتوي CLIENT_ID/CLIENT_SECRET/TENANT_ID/SUBSCRIPTION_ID)
+  - name: Azuredevops
+    value: eqr-dev-rg           # غيّره لاسم RG عندك
+  - name: APP_NAME_PREFIX
+    value: eqr-fakerestapi-     # بادئة أسماء الويب آب اللي تنشئها Terraform (بنختار الأحدث بالبادئة هذه)
+  - name: APP_ZIP
+    value: build/app.zip        # مسار ملف الـzip الذي سننشره
 
-- name: RESOURCE_GROUP
-  value: eqr-dev-rg
-
-- name: APP_NAME_PREFIX
-  value: eqr-fakerestapi-
-
-- name: APP_ZIP
-  value: build/app.zip
-
-
+# ========================= CI =========================
 stages:
-# ================= CI =================
 - stage: BuildAndTest
   displayName: "Build & Test"
   jobs:
   - job: ci
     displayName: "Lint & unit tests"
     steps:
-    - checkout: self
+      - checkout: self
 
-    - bash: |
-        set -euxo pipefail
-        export DEBIAN_FRONTEND=noninteractive
+      # نثبّت Python 3.10 ونضيفه للـPATH (لا نستخدم apt نهائياً)
+      - task: UsePythonVersion@0
+        displayName: "Use Python 3.10"
+        inputs:
+          versionSpec: '3.10'
+          addToPath: true
 
-        # أدوات أساسية
-        sudo apt-get update
-        sudo apt-get install -y ca-certificates curl zip unzip python3 python3-pip python3-venv python3-distutils
+      # إنشاء venv + تثبيت الأدوات + lint + tests
+      - bash: |
+          set -euxo pipefail
 
-        # لو pip مفقود على نسخة بايثون قديمة
-        if ! python3 -m pip --version >/dev/null 2>&1; then
-          curl -sS https://bootstrap.pypa.io/pip/3.6/get-pip.py -o get-pip.py
-          sudo -H python3 get-pip.py
-        fi
+          python --version
+          which python
 
-        # حافظ على نسخ متوافقة
-        python3 -m pip install --upgrade "pip<22.0" "setuptools<60" wheel
+          # إنشاء بيئة افتراضية
+          python -m venv .venv
+          . .venv/bin/activate
 
-        # أنشئ venv (مع بديل virtualenv لو فشل)
-        if ! python3 -m venv .venv >/dev/null 2>&1; then
-          python3 -m pip install "virtualenv==20.24.5"
-          python3 -m virtualenv -p python3 .venv
-        fi
+          # تحديث أدوات البايثون الأساسية
+          python -m pip install --upgrade pip setuptools wheel
 
-        . .venv/bin/activate
-        python -V
-        python -m pip --version
+          # لو عندك requirements.txt ثبّتها
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
 
-        # تثبيت متطلبات المشروع + أدوات الفحص والاختبار
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        pip install "flake8<6" "pytest<8"
+          # أدوات الفحص والاختبار بإصدارات متوافقة
+          pip install "flake8<7" "pytest<9"
 
-        # Lint (تجاهل مجلدات معينة)
-        flake8 . --exclude .venv,build,.git --max-line-length 120
+          # Lint (استثناء مجلدات لا نحتاجها)
+          flake8 . --exclude .venv,build,.git --max-line-length 120
 
-        # اختبارات (لو ما فيه اختبارات، اعتبره نجاح)
-        pytest -q || if [ $? -eq 5 ]; then echo "No tests collected"; else exit 1; fi
-      displayName: "Ensure Python + venv + lint & tests"
+          # اختبارات: اسمح بعدم وجود اختبارات (Exit code 5)
+          pytest -q || if [ $$? -eq 5 ]; then echo "No tests collected"; else exit 1; fi
+        displayName: "Ensure Python + venv + lint & tests"
 
-    - bash: |
-        set -euxo pipefail
-        mkdir -p build
-        zip -r "$(APP_ZIP)" . \
-          -x ".git/*" ".venv/*" "build/*" "__pycache__/*" "*.pyc"
-        ls -lh "$(APP_ZIP)"
-      displayName: "Package app (zip)"
+      # إنشاء ملف zip للتطبيق
+      - bash: |
+          set -euxo pipefail
 
-    - publish: $(APP_ZIP)
-      artifact: appzip
-      displayName: "Publish artifact"
+          mkdir -p build
+          zip -r "$(APP_ZIP)" . \
+            -x ".git/*" ".venv/*" "build/*" "__pycache__/*" "*.pyc"
+          ls -lh "$(APP_ZIP)"
+        displayName: "Package app (zip)"
 
-# ================= CD =================
+      # نشر الآرتيفاكت (الـzip)
+      - publish: $(APP_ZIP)
+        artifact: appzip
+        displayName: "Publish artifact"
+
+# ========================= CD =========================
 - stage: Deploy
   displayName: "Deploy to App Service"
   dependsOn: BuildAndTest
   jobs:
   - deployment: deploy
     displayName: "Zip deploy"
-    environment: "dev"   # ممكن تغيّرها لاسم Environment عندك أو احذف السطر لو ما تحتاج approvals
+    environment: "dev"   # غيّرها لاسم Environment اللي عندك إن وُجد
     strategy:
       runOnce:
         deploy:
           steps:
-          - download: current
-            artifact: appzip
+            # تنزيل الآرتيفاكت اللي رفعناه في الـCI
+            - download: current
+              artifact: appzip
 
-          - bash: |
-              set -euxo pipefail
+            # تسجيل الدخول في Azure + نشر الـzip + smoke test
+            - bash: |
+                set -euxo pipefail
 
-              # ثبّت Azure CLI لو مش موجود (على self-hosted غالباً مفيد)
-              if ! command -v az >/dev/null 2>&1; then
-                curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-              fi
+                # ثبّت Azure CLI لو مش موجود
+                if ! command -v az >/dev/null 2>&1; then
+                  curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+                fi
 
-              # ---- تسجيل الدخول بخدمة الخدمة (Service Principal) ----
-              az login --service-principal \
-                -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" >/dev/null
+                # تسجيل الدخول بواسطة Service Principal (من variable group)
+                az login --service-principal \
+                  -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" >/dev/null
 
-              az account set --subscription "$SUBSCRIPTION_ID"
+                az account set --subscription "$SUBSCRIPTION_ID"
 
-              # ابحث عن أحدث WebApp يبدأ بالبادئة المحددة داخل نفس RG
-              APP_NAME="$(az webapp list -g "$(RESOURCE_GROUP)" \
-                --query "reverse(sort_by([?starts_with(name, '$(APP_NAME_PREFIX)')], &name))[:1].name" -o tsv || true)"
+                # إحضار أحدث Web App يبدأ بالبادئة المحددة
+                APP_NAME="$(az webapp list -g "$(RESOURCE_GROUP)" \
+                  --query "reverse(sort_by([?starts_with(name, '$(APP_NAME_PREFIX)')], &name))[:1].name" -o tsv)"
 
-              if [ -z "${APP_NAME}" ]; then
-                echo "No webapp matching '$(APP_NAME_PREFIX)' in RG '$(RESOURCE_GROUP)'." >&2
-                exit 1
-              fi
+                if [ -z "$APP_NAME" ]; then
+                  echo "No webapp matching '$(APP_NAME_PREFIX)' in RG '$(RESOURCE_GROUP)'." >&2
+                  exit 1
+                fi
+                echo "Deploying to: ${APP_NAME}"
 
-              echo "Deploying to: ${APP_NAME}"
+                # Zip deploy
+                az webapp deployment source config-zip \
+                  -g "$(RESOURCE_GROUP)" -n "${APP_NAME}" \
+                  --src "$(Pipeline.Workspace)/appzip/app.zip"
 
-              # نشر ZIP
-              az webapp deployment source config-zip \
-                -g "$(RESOURCE_GROUP)" -n "${APP_NAME}" \
-                --src "$(Pipeline.Workspace)/appzip/app.zip"
-
-              # Smoke check
-              HOST="$(az webapp show -g "$(RESOURCE_GROUP)" -n "${APP_NAME}" --query "defaultHostName" -o tsv)"
-              echo "Smoke check https://${HOST}/"
-              curl -I --max-time 20 "https://${HOST}/" || true
-            displayName: "Login + Deploy (zip) + smoke check"
-            env:
-              CLIENT_ID: $(CLIENT_ID)
-              CLIENT_SECRET: $(CLIENT_SECRET)
-              TENANT_ID: $(TENANT_ID)
-              SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
+                # Smoke check
+                HOST="$(az webapp show -g "$(RESOURCE_GROUP)" -n "${APP_NAME}" --query "defaultHostName" -o tsv)"
+                echo "Smoke check https://${HOST}/"
+                curl -I --max-time 20 "https://${HOST}/" || true
+              displayName: "Login + Deploy (zip) + smoke check"
+              env:
+                CLIENT_ID: $(CLIENT_ID)
+                CLIENT_SECRET: $(CLIENT_SECRET)
+                TENANT_ID: $(TENANT_ID)
+                SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
