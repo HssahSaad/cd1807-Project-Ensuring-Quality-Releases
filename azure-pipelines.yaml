@@ -1,162 +1,132 @@
-# ================= Trigger =================
 trigger:
-- main
+  branches:
+    include:
+      - main
 
-# ====== Self-hosted agent (Windows) ======
 pool:
-  name: myAgentPool   # غيّرها إذا اسم الـPool مختلف عندك
+  vmImage: windows-latest   # نستخدم Windows agent
 
-# ================= Variables =================
 variables:
-  - group: eqr-secrets        # يجب أن تحتوي CLIENT_ID / CLIENT_SECRET / TENANT_ID / SUBSCRIPTION_ID
-  - name: RESOURCE_GROUP
-    value: Azuredevops         # غيّرها لاسم RG عندك
-  - name: APP_NAME_PREFIX
-    value: eqr-fakerestapi-   # بادئة أسماء الويب آب التي أنشأتها Terraform
-  - name: APP_ZIP
-    value: build/app.zip      # مسار ملف الـzip الذي سننشره
+- group: eqr-secrets        # لازم يكون موجود بالـ Library > Variable groups
+- name: RESOURCE_GROUP
+  value: eqr-dev-rg
+- name: APP_NAME_PREFIX
+  value: eqr-fakerestapi-
+- name: APP_ZIP
+  value: build/app.zip
 
-# ===================== CI =====================
 stages:
+
+# ================= CI =================
 - stage: BuildAndTest
-  displayName: "Build & Test"
+  displayName: Build & Test
   jobs:
   - job: ci
-    displayName: "Lint & unit tests (Windows)"
+    displayName: Lint & unit tests
     steps:
-      - checkout: self
+    - checkout: self
 
-      # 1) تأكيد وجود Chocolatey (لا نحاول التثبيت إذا موجود)
-      - powershell: |
+    # تشغيل flake8 + pytest
+    - task: PowerShell@2
+      displayName: Run lint & unit tests
+      inputs:
+        targetType: inline
+        pwsh: true
+        script: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "Ensure Python tools..."
+          python --version
+          pip --version
+          pip install flake8 pytest
+          flake8 . --exclude .venv,build,.git --max-line-length 120
+          pytest -q
+          if ($LASTEXITCODE -eq 5) {
+            Write-Host "No tests collected"
+            exit 0
+          }
+          exit $LASTEXITCODE
+
+    # (اختياري) التأكد من Chocolatey على Windows
+    - task: PowerShell@2
+      displayName: Ensure Chocolatey
+      inputs:
+        targetType: inline
+        pwsh: false      # نستخدم Windows PowerShell
+        script: |
           $ErrorActionPreference = 'Stop'
           if (Get-Command choco.exe -ErrorAction SilentlyContinue) {
             Write-Host "Chocolatey already installed:"
             choco --version
-          }
-          else {
+          } else {
             Write-Host "Installing Chocolatey..."
             Set-ExecutionPolicy Bypass -Scope Process -Force
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Invoke-Expression ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
             choco --version
           }
-          # لا تجعل السكربت يفشل لو طلع Warning من سكربت التثبيت
-          exit 0
-        displayName: "Ensure Chocolatey"
 
-      # 2) تثبيت Python 3.10 عبر Chocolatey (لو غير موجود)
-      - powershell: |
-          $ErrorActionPreference = 'Stop'
-          $desired = '3.10.11'
-          $pyExists = Get-Command python.exe -ErrorAction SilentlyContinue
-          if ($pyExists) {
-            python --version
-          }
-          else {
-            choco install python --version $desired -y --no-progress
-            python --version
-          }
-        displayName: "Install Python 3.10 (choco)"
-
-      # 3) إنشاء venv + تثبيت التبعيات + flake8/pytest + تشغيل lint/tests
-      - powershell: |
-          $ErrorActionPreference = 'Stop'
-
-          python -m venv .venv
-          $py  = ".\.venv\Scripts\python.exe"
-          $pip = ".\.venv\Scripts\pip.exe"
-
-          & $py --version
-          & $py -m pip install --upgrade pip setuptools wheel
-
-          if (Test-Path "requirements.txt") {
-            & $pip install -r requirements.txt
-          }
-
-          & $pip install "flake8==6.1.0" "pytest==7.4.4"
-
-          .\.venv\Scripts\flake8.exe . --exclude .venv,build,.git --max-line-length 120
-
-          .\.venv\Scripts\pytest.exe -q
-          if ($LASTEXITCODE -eq 5) {
-            Write-Host "No tests collected"
-            exit 0
-          } elseif ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-        displayName: "Create venv + lint & tests"
-
-      # 4) إنشاء ملف ZIP للتطبيق
-      - powershell: |
-          $ErrorActionPreference = 'Stop'
+    # إنشاء ملف zip ونشره كـ artifact
+    - task: PowerShell@2
+      displayName: Package app (zip)
+      inputs:
+        targetType: inline
+        pwsh: true
+        script: |
           New-Item -ItemType Directory -Force -Path build | Out-Null
-          $zip = "$(APP_ZIP)"
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          tar -a -c -f $zip --exclude=.git --exclude=build --exclude=.venv --exclude=__pycache__ --exclude="*.pyc" *
-          Get-Item $zip | Format-List FullName,Length
-        displayName: "Package app (zip)"
+          Compress-Archive -Path * -DestinationPath "$(APP_ZIP)" -Force
+          Get-ChildItem build
 
-      # 5) نشر الآرتيفاكت
-      - publish: $(APP_ZIP)
-        artifact: appzip
-        displayName: "Publish artifact"
+    - publish: $(APP_ZIP)
+      artifact: appzip
+      displayName: Publish artifact
 
-# ===================== CD =====================
+
+# ================= CD =================
 - stage: Deploy
-  displayName: "Deploy to App Service"
+  displayName: Deploy to App Service
   dependsOn: BuildAndTest
   jobs:
   - deployment: deploy
-    displayName: "Zip deploy (Windows)"
-    environment: "dev"     # غيّرها إذا عندك اسم Environment مختلف
+    displayName: Zip deploy
+    environment: dev
     strategy:
       runOnce:
         deploy:
           steps:
-            - download: current
-              artifact: appzip
+          - download: current
+            artifact: appzip
 
-            - powershell: |
+          - task: PowerShell@2
+            displayName: Login + Deploy (zip) + smoke check
+            env:
+              CLIENT_ID: $(CLIENT_ID)
+              CLIENT_SECRET: $(CLIENT_SECRET)
+              TENANT_ID: $(TENANT_ID)
+              SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
                 $ErrorActionPreference = 'Stop'
 
-                # تثبيت Azure CLI لو غير موجود
-                if (-not (Get-Command az.exe -ErrorAction SilentlyContinue)) {
-                  Write-Host "Installing Azure CLI..."
-                  $msi = "$env:TEMP\azcli.msi"
-                  Invoke-WebRequest -Uri "https://aka.ms/installazurecliwindows" -OutFile $msi
-                  Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msi`" /quiet /qn /norestart"
-                }
-                az --version
-
-                # تسجيل الدخول بواسطة Service Principal (من variable group)
-                az login --service-principal `
-                  -u "$env:CLIENT_ID" -p "$env:CLIENT_SECRET" --tenant "$env:TENANT_ID" | Out-Null
-
+                az login --service-principal -u "$env:CLIENT_ID" -p "$env:CLIENT_SECRET" --tenant "$env:TENANT_ID" | Out-Null
                 az account set --subscription "$env:SUBSCRIPTION_ID"
 
-                # الحصول على أحدث Web App يبدأ بالبادئة
-                $appName = az webapp list -g "$(RESOURCE_GROUP)" `
-                  --query "reverse(sort_by([?starts_with(name, '$(APP_NAME_PREFIX)')], &name))[:1].name" -o tsv
-
+                $appName = az webapp list -g "$(RESOURCE_GROUP)" --query "reverse(sort_by([?starts_with(name, '$(APP_NAME_PREFIX)')], &name))[:1].name" -o tsv
                 if (-not $appName) {
-                  Write-Error "No webapp matching '$(APP_NAME_PREFIX)' in RG '$(RESOURCE_GROUP)'."
+                  Write-Error "No webapp found with prefix '$(APP_NAME_PREFIX)' in RG '$(RESOURCE_GROUP)'."
+                  exit 1
                 }
-                Write-Host "Deploying to: $appName"
 
-                $zipPath = "$(Pipeline.Workspace)\appzip\app.zip"
+                Write-Host "Deploying to: $appName"
                 az webapp deployment source config-zip `
-                  -g "$(RESOURCE_GROUP)" -n $appName --src $zipPath
+                  -g "$(RESOURCE_GROUP)" -n $appName `
+                  --src "$(Pipeline.Workspace)/appzip/app.zip"
 
                 $host = az webapp show -g "$(RESOURCE_GROUP)" -n $appName --query "defaultHostName" -o tsv
+                Write-Host "Smoke check https://$host/"
                 try {
-                  $res = Invoke-WebRequest -Uri ("https://{0}/" -f $host) -Method Head -TimeoutSec 20
-                  Write-Host "Smoke check: $($res.StatusCode)"
+                  (Invoke-WebRequest -Uri "https://$host/" -Method Head -TimeoutSec 20).StatusCode
                 } catch {
                   Write-Warning "Smoke check failed: $($_.Exception.Message)"
                 }
-              displayName: "Login + Deploy (zip) + smoke check"
-              env:
-                CLIENT_ID: $(CLIENT_ID)
-                CLIENT_SECRET: $(CLIENT_SECRET)
-                TENANT_ID: $(TENANT_ID)
-                SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
