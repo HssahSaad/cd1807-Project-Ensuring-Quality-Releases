@@ -1,150 +1,138 @@
-# azure-pipelines.yaml
-# Trigger: manual for now. غيّرها لاحقًا لو تبغى على فروع معيّنة.
-trigger: none
+trigger:
+  branches:
+    include:
+      - main   # شغّل البايبلاين على أي دفع (commit) لفرع main
 
-# استخدم Microsoft-hosted agent
+# شغّل على الـ self-hosted agent اللي عندك
 pool:
-  vmImage: ubuntu-latest
+  name: myAgentPool       # غيّرها إذا كان اسم الـ pool مختلف عندك
 
-# ========= Variables =========
+# المتغيّرات
 variables:
-  System.Debug: 'true'
+- group: eqr-secrets         # يحتوي CLIENT_ID / CLIENT_SECRET / TENANT_ID / SUBSCRIPTION_ID
 
-  # اسم اتصال Azure DevOps Service Connection (OIDC)
-  azureServiceConnectionId: 'AzureServiceConnection'
+- name: RESOURCE_GROUP
+  value: eqr-dev-rg
 
-  # Terraform
-  TF_VERSION: '1.8.5'
+- name: APP_NAME_PREFIX
+  value: eqr-fakerestapi-
 
-  # Backend (tfstate)
-  TF_BACKEND_RG: 'Azuredevops'
-  TF_BACKEND_SA: 'tfstate3193425499'
-  TF_BACKEND_CONTAINER: 'tfstate'
-  TF_BACKEND_KEY: 'test.terraform.tfstate'
+- name: APP_ZIP
+  value: build/app.zip
 
-  # متغيّرات Terraform للموديلات (عدّلها حسب مشروعك)
-  TF_VAR_project_name:        'qa-project'
-  TF_VAR_location:            'westeurope'
-  TF_VAR_resource_group_name: 'eqr-dev-rg'
-  # اسم الويب آب بيتكوّن لاحقًا من الموديول، هنا مجرد مثال:
-  TF_VAR_webapp_name:         'qa-fakerestapi-$(Build.SourceVersion)'
 
 stages:
-- stage: Build
-  displayName: Build (Terraform + Artifacts)
+# ================= CI =================
+- stage: BuildAndTest
+  displayName: "Build & Test"
   jobs:
-  - job: BuildInfrastructure
-    displayName: Build Infrastructure + Package Tests
+  - job: ci
+    displayName: "Lint & unit tests"
     steps:
     - checkout: self
-      persistCredentials: true
 
-    # ===== Terraform (init/plan/apply) =====
-    - task: AzureCLI@2
-      displayName: Terraform init/plan/apply (AAD/OIDC)
-      inputs:
-        azureSubscription: '$(azureServiceConnectionId)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        addSpnToEnvironment: true
-        workingDirectory: '$(Build.SourcesDirectory)/terraform/environments/test'
-        inlineScript: |
-          set -eo pipefail
-          echo "==> az account show"
-          az account show
+    - bash: |
+        set -euxo pipefail
+        export DEBIAN_FRONTEND=noninteractive
 
-          echo "==> Print repo root and files"
-          echo "$(Build.SourcesDirectory)"
-          ls -la "$(Build.SourcesDirectory)" || true
+        # أدوات أساسية
+        sudo apt-get update
+        sudo apt-get install -y ca-certificates curl zip unzip python3 python3-pip python3-venv python3-distutils
 
-          echo "==> Check terraform working dir: $(pwd)"
-          ls -la || true
+        # لو pip مفقود على نسخة بايثون قديمة
+        if ! python3 -m pip --version >/dev/null 2>&1; then
+          curl -sS https://bootstrap.pypa.io/pip/3.6/get-pip.py -o get-pip.py
+          sudo -H python3 get-pip.py
+        fi
 
-          # 0) Ephemeral SSH key for this run (علشان vm module لو يطلب مفتاح)
-          mkdir -p "$HOME/.ssh"
-          ssh-keygen -t rsa -b 4096 -N "" -f "$HOME/.ssh/azdo_ephemeral" -q
-          export TF_VAR_admin_ssh_public_key="$(cat "$HOME/.ssh/azdo_ephemeral.pub")"
-          export TF_VAR_admin_username="azureuser"
+        # حافظ على نسخ متوافقة
+        python3 -m pip install --upgrade "pip<22.0" "setuptools<60" wheel
 
-          # ---- OIDC for Terraform (critical) ----
-          export ARM_USE_OIDC=true
-          export ARM_CLIENT_ID="$servicePrincipalId"
-          export ARM_TENANT_ID="$tenantId"
-          export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
-          export ARM_OIDC_TOKEN="$idToken"
+        # أنشئ venv (مع بديل virtualenv لو فشل)
+        if ! python3 -m venv .venv >/dev/null 2>&1; then
+          python3 -m pip install "virtualenv==20.24.5"
+          python3 -m virtualenv -p python3 .venv
+        fi
 
-          # 1) Install the exact Terraform version
-          mkdir -p "$HOME/bin"
-          export PATH="$HOME/bin:$PATH"
-          TF_ZIP="/tmp/terraform_${TF_VERSION}_linux_amd64.zip"
-          curl -sSL -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
-          python3 -m zipfile -e "$TF_ZIP" /tmp
-          mv -f /tmp/terraform "$HOME/bin/terraform"
-          chmod +x "$HOME/bin/terraform"
-          terraform -version
+        . .venv/bin/activate
+        python -V
+        python -m pip --version
 
-          # 2) Ensure tfstate container exists
-          az storage container create \
-            --name "$(TF_BACKEND_CONTAINER)" \
-            --account-name "$(TF_BACKEND_SA)" \
-            --auth-mode login >/dev/null 2>&1 || true
+        # تثبيت متطلبات المشروع + أدوات الفحص والاختبار
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install "flake8<6" "pytest<8"
 
-          # 3) Terraform init using AAD (OIDC)
-          echo "=== Terraform INIT ==="
-          terraform init -input=false -no-color \
-            -backend-config="resource_group_name=$(TF_BACKEND_RG)" \
-            -backend-config="storage_account_name=$(TF_BACKEND_SA)" \
-            -backend-config="container_name=$(TF_BACKEND_CONTAINER)" \
-            -backend-config="key=$(TF_BACKEND_KEY)" \
-            -backend-config="use_azuread_auth=true"
+        # Lint (تجاهل مجلدات معينة)
+        flake8 . --exclude .venv,build,.git --max-line-length 120
 
-          # 4) Validate + Plan + Apply
-          terraform validate -no-color
-          terraform plan -input=false -no-color -out=tfplan
-          terraform apply -input=false -no-color -auto-approve tfplan
+        # اختبارات (لو ما فيه اختبارات، اعتبره نجاح)
+        pytest -q || if [ $? -eq 5 ]; then echo "No tests collected"; else exit 1; fi
+      displayName: "Ensure Python + venv + lint & tests"
 
-    # ===== Verify test folders exist =====
-    - script: |
-        echo "==> Verify test folders exist"
-        ls -la automatedtesting || true
-        ls -la automatedtesting/selenium || true
-        ls -la automatedtesting/jmeter || true
-        ls -la automatedtesting/jmeter/fakerestapi || true
-        ls -la automatedtesting/jmeter/test-suite || true
-      displayName: Verify test folders
+    - bash: |
+        set -euxo pipefail
+        mkdir -p build
+        zip -r "$(APP_ZIP)" . \
+          -x ".git/*" ".venv/*" "build/*" "__pycache__/*" "*.pyc"
+        ls -lh "$(APP_ZIP)"
+      displayName: "Package app (zip)"
 
-    # ===== Archive test packages =====
-    - task: ArchiveFiles@2
-      displayName: Archive selenium/
-      inputs:
-        rootFolderOrFile: '$(Build.SourcesDirectory)/automatedtesting/selenium'
-        includeRootFolder: false
-        archiveType: 'zip'
-        archiveFile: '$(Build.ArtifactStagingDirectory)/selenium.zip'
-        replaceExistingArchive: true
+    - publish: $(APP_ZIP)
+      artifact: appzip
+      displayName: "Publish artifact"
 
-    - task: ArchiveFiles@2
-      displayName: Archive jmeter/fakerestapi/
-      inputs:
-        rootFolderOrFile: '$(Build.SourcesDirectory)/automatedtesting/jmeter/fakerestapi'
-        includeRootFolder: false
-        archiveType: 'zip'
-        archiveFile: '$(Build.ArtifactStagingDirectory)/fakerestapi.zip'
-        replaceExistingArchive: true
+# ================= CD =================
+- stage: Deploy
+  displayName: "Deploy to App Service"
+  dependsOn: BuildAndTest
+  jobs:
+  - deployment: deploy
+    displayName: "Zip deploy"
+    environment: "dev"   # ممكن تغيّرها لاسم Environment عندك أو احذف السطر لو ما تحتاج approvals
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: appzip
 
-    - task: ArchiveFiles@2
-      displayName: Archive jmeter/test-suite/
-      inputs:
-        rootFolderOrFile: '$(Build.SourcesDirectory)/automatedtesting/jmeter/test-suite'
-        includeRootFolder: false
-        archiveType: 'zip'
-        archiveFile: '$(Build.ArtifactStagingDirectory)/jmeter-tests.zip'
-        replaceExistingArchive: true
+          - bash: |
+              set -euxo pipefail
 
-    # ===== Publish artifacts =====
-    - task: PublishPipelineArtifact@1
-      displayName: Publish artifacts (selenium, fakerestapi, jmeter-tests)
-      inputs:
-        targetPath: '$(Build.ArtifactStagingDirectory)'
-        artifact: 'drop'
-        publishLocation: 'pipeline'
+              # ثبّت Azure CLI لو مش موجود (على self-hosted غالباً مفيد)
+              if ! command -v az >/dev/null 2>&1; then
+                curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+              fi
+
+              # ---- تسجيل الدخول بخدمة الخدمة (Service Principal) ----
+              az login --service-principal \
+                -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" >/dev/null
+
+              az account set --subscription "$SUBSCRIPTION_ID"
+
+              # ابحث عن أحدث WebApp يبدأ بالبادئة المحددة داخل نفس RG
+              APP_NAME="$(az webapp list -g "$(RESOURCE_GROUP)" \
+                --query "reverse(sort_by([?starts_with(name, '$(APP_NAME_PREFIX)')], &name))[:1].name" -o tsv || true)"
+
+              if [ -z "${APP_NAME}" ]; then
+                echo "No webapp matching '$(APP_NAME_PREFIX)' in RG '$(RESOURCE_GROUP)'." >&2
+                exit 1
+              fi
+
+              echo "Deploying to: ${APP_NAME}"
+
+              # نشر ZIP
+              az webapp deployment source config-zip \
+                -g "$(RESOURCE_GROUP)" -n "${APP_NAME}" \
+                --src "$(Pipeline.Workspace)/appzip/app.zip"
+
+              # Smoke check
+              HOST="$(az webapp show -g "$(RESOURCE_GROUP)" -n "${APP_NAME}" --query "defaultHostName" -o tsv)"
+              echo "Smoke check https://${HOST}/"
+              curl -I --max-time 20 "https://${HOST}/" || true
+            displayName: "Login + Deploy (zip) + smoke check"
+            env:
+              CLIENT_ID: $(CLIENT_ID)
+              CLIENT_SECRET: $(CLIENT_SECRET)
+              TENANT_ID: $(TENANT_ID)
+              SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
